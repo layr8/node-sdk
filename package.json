@@ -1,0 +1,36 @@
+{
+  "name": "@layr8/sdk",
+  "version": "0.1.0",
+  "description": "Layr8 DIDComm Agent SDK for Node.js",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "ws": "^8.18.0",
+    "uuid": "^11.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.0",
+    "@types/uuid": "^10.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  },
+  "license": "MIT"
+}
