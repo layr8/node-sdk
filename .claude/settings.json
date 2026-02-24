@@ -1,0 +1,10 @@
+{
+  "extraKnownMarketplaces": {
+    "layr8-skills": {
+      "source": { "source": "github", "repo": "layr8/claude-skills" }
+    }
+  },
+  "enabledPlugins": {
+    "layr8-skills@layr8-skills": true
+  }
+}
