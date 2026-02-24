@@ -42,6 +42,26 @@ describe("resolveConfig", () => {
     ).toThrow(/apiKey is required/);
   });
 
+  it("normalizes https:// to wss://", () => {
+    const cfg = resolveConfig({
+      nodeUrl: "https://mynode.layr8.cloud/plugin_socket/websocket",
+      apiKey: "key",
+    });
+    expect(cfg.nodeUrl).toBe(
+      "wss://mynode.layr8.cloud/plugin_socket/websocket",
+    );
+  });
+
+  it("normalizes http:// to ws://", () => {
+    const cfg = resolveConfig({
+      nodeUrl: "http://localhost:4000/plugin_socket/websocket",
+      apiKey: "key",
+    });
+    expect(cfg.nodeUrl).toBe(
+      "ws://localhost:4000/plugin_socket/websocket",
+    );
+  });
+
   it("allows empty agentDid", () => {
     const cfg = resolveConfig({
       nodeUrl: "ws://localhost:4000",
