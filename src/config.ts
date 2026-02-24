@@ -28,11 +28,21 @@ export function resolveConfig(cfg: Config): ResolvedConfig {
       "nodeUrl is required (set in Config or LAYR8_NODE_URL env)",
     );
   }
+
+  // Normalize HTTP(S) URLs to WebSocket scheme.
+  // In production, the /plugin_socket endpoint serves WebSocket over HTTPS.
+  let normalizedUrl = nodeUrl;
+  if (normalizedUrl.startsWith("https://")) {
+    normalizedUrl = "wss://" + normalizedUrl.slice("https://".length);
+  } else if (normalizedUrl.startsWith("http://")) {
+    normalizedUrl = "ws://" + normalizedUrl.slice("http://".length);
+  }
+
   if (!apiKey) {
     throw new Layr8Error(
       "apiKey is required (set in Config or LAYR8_API_KEY env)",
     );
   }
 
-  return { nodeUrl, apiKey, agentDid };
+  return { nodeUrl: normalizedUrl, apiKey, agentDid };
 }
