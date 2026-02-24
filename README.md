@@ -344,6 +344,14 @@ An interactive chat client for DIDComm basic messaging. Demonstrates fire-and-fo
 LAYR8_API_KEY=your-key npx tsx examples/chat.ts did:web:friend:chat-agent
 ```
 
+### Durable Handler
+
+Persist-then-ack pattern: writes inbound messages to a JSON-lines file before acknowledging. If the process crashes before ack, the cloud-node redelivers. Demonstrates `manualAck` with zero external dependencies.
+
+```bash
+LAYR8_API_KEY=your-key npx tsx examples/durable-handler.ts
+```
+
 ## Development
 
 ### Prerequisites
