@@ -585,4 +585,16 @@ describe("Layr8Client", () => {
 
     await client.close();
   });
+
+  it("creates client with no arguments when env vars are set", () => {
+    process.env.LAYR8_NODE_URL = "ws://localhost:4000/plugin_socket/websocket";
+    process.env.LAYR8_API_KEY = "test-key";
+    try {
+      const client = new Layr8Client();
+      expect(client).toBeDefined();
+    } finally {
+      delete process.env.LAYR8_NODE_URL;
+      delete process.env.LAYR8_API_KEY;
+    }
+  });
 });
