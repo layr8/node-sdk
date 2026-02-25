@@ -502,6 +502,36 @@ describe("Layr8Client", () => {
     await client.close();
   });
 
+  it("includes server reason in join rejection error", async () => {
+    await setupServer();
+
+    server.onMsg = (msg) => {
+      if (msg.event === "phx_join") {
+        server.sendToClient(
+          msg.ref,
+          msg.ref,
+          msg.topic,
+          "phx_reply",
+          {
+            status: "error",
+            response: {
+              reason: "e.connect.plugin.failed: protocols_already_bound",
+            },
+          },
+        );
+      }
+    };
+
+    const client = new Layr8Client({
+      nodeUrl: wsUrl,
+      apiKey: "test-key",
+      agentDid: "did:web:test",
+    });
+    client.handle("https://layr8.io/protocols/echo/1.0/request", async () => null);
+
+    await expect(client.connect()).rejects.toThrow(/protocols_already_bound/);
+  });
+
   it("handles concurrent requests correctly", async () => {
     await setupServer();
 
@@ -554,5 +584,17 @@ describe("Layr8Client", () => {
     }
 
     await client.close();
+  });
+
+  it("creates client with no arguments when env vars are set", () => {
+    process.env.LAYR8_NODE_URL = "ws://localhost:4000/plugin_socket/websocket";
+    process.env.LAYR8_API_KEY = "test-key";
+    try {
+      const client = new Layr8Client();
+      expect(client).toBeDefined();
+    } finally {
+      delete process.env.LAYR8_NODE_URL;
+      delete process.env.LAYR8_API_KEY;
+    }
   });
 });

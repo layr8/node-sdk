@@ -173,15 +173,11 @@ export class PhoenixChannel {
         signal?.removeEventListener("abort", onAbort);
         const reply = payload as {
           status: string;
-          response?: { did?: string };
+          response?: { did?: string; reason?: string };
         };
         if (reply.status !== "ok") {
-          reject(
-            new ConnectionError(
-              this.wsUrl,
-              `join rejected: ${reply.status}`,
-            ),
-          );
+          const reason = reply.response?.reason ?? `join rejected: ${reply.status}`;
+          reject(new ConnectionError(this.wsUrl, reason));
           return;
         }
         if (reply.response?.did) {

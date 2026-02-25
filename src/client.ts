@@ -46,7 +46,7 @@ export class Layr8Client extends EventEmitter {
     (msg: InternalMessage) => void
   >();
 
-  constructor(cfg: Config) {
+  constructor(cfg: Config = {}) {
     super();
     this.cfg = resolveConfig(cfg);
     this.agentDid = this.cfg.agentDid;
