@@ -13,14 +13,14 @@ Requires Node.js 20 or later. The package is ESM-only (`"type": "module"`).
 ## Quick Start
 
 ```typescript
-import { Layr8Client, unmarshalBody } from "@layr8/sdk";
+import { Layr8Client, unmarshalBody, logErrors } from "@layr8/sdk";
 import type { Message } from "@layr8/sdk";
 
 interface EchoRequest {
   message: string;
 }
 
-const client = new Layr8Client({
+const client = new Layr8Client(logErrors(), {
   nodeUrl: "ws://localhost:4000/plugin_socket/websocket",
   apiKey: "your-api-key",
   agentDid: "did:web:myorg:my-agent",
@@ -58,7 +58,7 @@ process.on("SIGINT", async () => {
 The `Layr8Client` is the main entry point. It manages the WebSocket connection to a cloud-node, routes inbound messages to handlers, and provides methods for sending outbound messages.
 
 ```typescript
-const client = new Layr8Client({...});
+const client = new Layr8Client(logErrors(), {...});
 
 // Register handlers before connecting
 client.handle(messageType, handlerFn);
@@ -126,9 +126,9 @@ The SDK automatically derives protocol base URIs from your handler message types
 
 ## Sending Messages
 
-### Send (Fire-and-Forget)
+### Send
 
-Send a one-way message with no response expected:
+Send a one-way message. By default, `send()` waits for the server to acknowledge receipt:
 
 ```typescript
 await client.send({
@@ -139,6 +139,27 @@ await client.send({
 ```
 
 `send()` accepts `Partial<Message>` — only `type`, `to`, and `body` are required.
+
+To skip waiting for the server acknowledgment, pass `{ fireAndForget: true }`:
+
+```typescript
+await client.send(
+  {
+    type: "https://didcomm.org/basicmessage/2.0/message",
+    to: ["did:web:other-org:their-agent"],
+    body: { content: "hello!" },
+  },
+  { fireAndForget: true },
+);
+```
+
+#### Send Options
+
+```typescript
+interface SendOptions {
+  fireAndForget?: boolean; // skip waiting for server ack (default: false)
+}
+```
 
 ### Request (Request/Response)
 
@@ -183,7 +204,7 @@ If `agentDid` is not provided, the cloud-node creates an ephemeral DID on connec
 
 ```typescript
 // Explicit configuration
-const client = new Layr8Client({
+const client = new Layr8Client(logErrors(), {
   nodeUrl: "ws://localhost:4000/plugin_socket/websocket",
   apiKey: "my-api-key",
   agentDid: "did:web:myorg:my-agent",
@@ -191,7 +212,7 @@ const client = new Layr8Client({
 
 // Environment-only configuration
 // Set LAYR8_NODE_URL, LAYR8_API_KEY, LAYR8_AGENT_DID
-const client = new Layr8Client({});
+const client = new Layr8Client(logErrors());
 ```
 
 ## Handler Options
@@ -225,7 +246,7 @@ client.handle(
 If no `agentDid` is configured, the cloud-node assigns an ephemeral DID on connect:
 
 ```typescript
-const client = new Layr8Client({
+const client = new Layr8Client(logErrors(), {
   nodeUrl: "ws://localhost:4000/plugin_socket/websocket",
   apiKey: "my-key",
 });
@@ -273,6 +294,64 @@ client.handle(messageType, async (msg: Message) => {
 | `senderCredentials` | `Credential[]` | Verifiable credentials presented by the sender |
 
 ## Error Handling
+
+### ErrorHandler (Required)
+
+The `Layr8Client` constructor requires an `ErrorHandler` callback as its first argument. This ensures no SDK errors are silently dropped. The callback receives structured `SDKError` objects for parse failures, unhandled message types, handler exceptions, and server rejections.
+
+```typescript
+import { Layr8Client, logErrors } from "@layr8/sdk";
+import type { ErrorHandler } from "@layr8/sdk";
+
+// Use the built-in logger (writes to console.error)
+const client = new Layr8Client(logErrors(), { ... });
+
+// Or provide a custom handler
+const onError: ErrorHandler = (err) => {
+  metrics.increment(`sdk.error.${err.kind}`);
+  logger.warn("SDK error", {
+    kind: err.kind,
+    messageId: err.messageId,
+    type: err.type,
+    cause: err.cause?.message,
+  });
+};
+const client = new Layr8Client(onError, { ... });
+```
+
+### SDKError
+
+`SDKError` is a structured error report passed to the `ErrorHandler`. It carries machine-readable context about what went wrong:
+
+| Field | Type | Description |
+|---|---|---|
+| `kind` | `ErrorKind` | Category of the error |
+| `messageId` | `string` | ID of the message that caused the error (if available) |
+| `type` | `string` | DIDComm message type (if available) |
+| `from` | `string` | Sender DID (if available) |
+| `cause` | `Error \| null` | Underlying error |
+| `raw` | `unknown` | Raw payload for parse failures |
+| `timestamp` | `Date` | When the error occurred |
+
+### ErrorKind
+
+| Kind | Description |
+|---|---|
+| `ParseFailure` | Inbound message could not be parsed as DIDComm |
+| `NoHandler` | No handler registered for the message type |
+| `HandlerException` | A handler threw an exception |
+| `ServerReject` | The server rejected a sent message |
+| `TransportWrite` | Failed to write to the WebSocket connection |
+
+### logErrors()
+
+`logErrors()` returns a built-in `ErrorHandler` that logs every error to `console.error` with structured metadata. Use it as a sensible default:
+
+```typescript
+import { logErrors } from "@layr8/sdk";
+
+const client = new Layr8Client(logErrors(), { ... });
+```
 
 ### Problem Reports
 

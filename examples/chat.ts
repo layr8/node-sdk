@@ -12,7 +12,7 @@
  */
 
 import * as readline from "node:readline";
-import { Layr8Client, unmarshalBody, ProblemReportError } from "../src/index.js";
+import { Layr8Client, unmarshalBody, ProblemReportError, logErrors } from "../src/index.js";
 import type { Message } from "../src/index.js";
 
 interface ChatMessage {
@@ -27,7 +27,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const client = new Layr8Client({});
+  const client = new Layr8Client(logErrors());
 
   // Receive chat messages
   client.handle(

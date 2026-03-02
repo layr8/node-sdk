@@ -4,9 +4,12 @@ import { resolveConfig } from "./config.js";
 import {
   AlreadyConnectedError,
   ClientClosedError,
+  ErrorKind,
   NotConnectedError,
   ProblemReportError,
+  SDKError,
 } from "./errors.js";
+import type { ErrorHandler } from "./errors.js";
 import type { HandlerFn, HandlerOptions } from "./handler.js";
 import { HandlerRegistry } from "./handler.js";
 import type { InternalMessage, Message } from "./message.js";
@@ -25,6 +28,12 @@ export interface RequestOptions {
   signal?: AbortSignal;
 }
 
+/** Options for send(). */
+export interface SendOptions {
+  /** Skip waiting for server acknowledgment. */
+  fireAndForget?: boolean;
+}
+
 /**
  * Layr8Client is the main entry point for interacting with the Layr8 platform.
  *
@@ -34,20 +43,27 @@ export interface RequestOptions {
  */
 export class Layr8Client extends EventEmitter {
   private readonly cfg;
+  private readonly onError: ErrorHandler;
   private readonly registry = new HandlerRegistry();
   private channel: PhoenixChannel | null = null;
   private connected = false;
   private isClosed = false;
   private agentDid: string;
 
-  /** Correlation map for Request/Response pattern: threadId → resolve function */
+  /** Correlation map for Request/Response pattern: threadId → {resolve, reject} */
   private readonly pending = new Map<
     string,
-    (msg: InternalMessage) => void
+    { resolve: (msg: InternalMessage) => void; reject: (err: Error) => void }
   >();
 
-  constructor(cfg: Config = {}) {
+  constructor(onError: ErrorHandler, cfg: Config = {}) {
     super();
+    if (typeof onError !== "function") {
+      throw new TypeError(
+        "ErrorHandler is required: pass logErrors() or a custom (error: SDKError) => void",
+      );
+    }
+    this.onError = onError;
     this.cfg = resolveConfig(cfg);
     this.agentDid = this.cfg.agentDid;
   }
@@ -116,19 +132,29 @@ export class Layr8Client extends EventEmitter {
     }
 
     // Reject all pending requests
-    for (const [threadId] of this.pending) {
+    for (const [threadId, pending] of this.pending) {
+      pending.reject(new ClientClosedError());
       this.pending.delete(threadId);
     }
   }
 
-  /** Send a fire-and-forget message. */
-  async send(msg: Partial<Message>): Promise<void> {
+  /**
+   * Send a message. By default waits for server acknowledgment.
+   * Pass `{ fireAndForget: true }` to skip waiting for the server reply.
+   */
+  async send(msg: Partial<Message>, opts?: SendOptions): Promise<void> {
     if (!this.connected || !this.channel) {
       throw new NotConnectedError();
     }
 
     const internal = this.fillMessage(msg);
-    this.sendMessage(internal);
+
+    if (opts?.fireAndForget) {
+      this.sendMessageFireAndForget(internal);
+      return;
+    }
+
+    await this.sendMessageAcked(internal);
   }
 
   /**
@@ -171,35 +197,48 @@ export class Layr8Client extends EventEmitter {
 
       signal?.addEventListener("abort", onAbort, { once: true });
 
-      this.pending.set(internal.threadId, (resp: InternalMessage) => {
-        cleanup();
+      this.pending.set(internal.threadId, {
+        resolve: (resp: InternalMessage) => {
+          cleanup();
 
-        // Check if response is a problem report
-        if (
-          resp.type ===
-          "https://didcomm.org/report-problem/2.0/problem-report"
-        ) {
-          const body = (resp.bodyRaw ?? resp.body) as {
-            code?: string;
-            comment?: string;
-          };
-          reject(
-            new ProblemReportError(
-              body?.code ?? "unknown",
-              body?.comment ?? "unknown error",
-            ),
-          );
-          return;
-        }
-        resolve(resp);
+          // Check if response is a problem report
+          if (
+            resp.type ===
+            "https://didcomm.org/report-problem/2.0/problem-report"
+          ) {
+            const body = (resp.bodyRaw ?? resp.body) as {
+              code?: string;
+              comment?: string;
+            };
+            reject(
+              new ProblemReportError(
+                body?.code ?? "unknown",
+                body?.comment ?? "unknown error",
+              ),
+            );
+            return;
+          }
+          resolve(resp);
+        },
+        reject: (err: Error) => {
+          cleanup();
+          reject(err);
+        },
       });
 
-      try {
-        this.sendMessage(internal);
-      } catch (err) {
-        cleanup();
-        reject(err);
-      }
+      this.channel!.send("message", JSON.parse(marshalDIDComm(internal)))
+        .then((reply) => {
+          if (reply.status === "error") {
+            cleanup();
+            reject(new Error(reply.reason || `server rejected message: ${reply.status}`));
+            return;
+          }
+          // Server accepted, keep waiting for DIDComm response
+        })
+        .catch((err) => {
+          cleanup();
+          reject(err);
+        });
     });
   }
 
@@ -207,23 +246,34 @@ export class Layr8Client extends EventEmitter {
     let msg: InternalMessage;
     try {
       msg = parseDIDComm(payload);
-    } catch {
-      return; // silently drop unparseable messages
+    } catch (err) {
+      this.onError(new SDKError(ErrorKind.ParseFailure, {
+        cause: err instanceof Error ? err : new Error(String(err)),
+        raw: payload,
+      }));
+      return;
     }
 
     // Check if this is a response to a pending Request (by thread ID)
     if (msg.threadId) {
-      const resolve = this.pending.get(msg.threadId);
-      if (resolve) {
+      const pending = this.pending.get(msg.threadId);
+      if (pending) {
         this.pending.delete(msg.threadId);
-        resolve(msg);
+        pending.resolve(msg);
         return;
       }
     }
 
     // Route to registered handler
     const entry = this.registry.lookup(msg.type);
-    if (!entry) return; // no handler registered
+    if (!entry) {
+      this.onError(new SDKError(ErrorKind.NoHandler, {
+        messageId: msg.id,
+        type: msg.type,
+        from: msg.from,
+      }));
+      return;
+    }
 
     // Auto-ack before handler (unless manual ack)
     if (!entry.manualAck) {
@@ -257,6 +307,12 @@ export class Layr8Client extends EventEmitter {
         this.sendMessage(internal);
       }
     } catch (err) {
+      this.onError(new SDKError(ErrorKind.HandlerException, {
+        messageId: msg.id,
+        type: msg.type,
+        from: msg.from,
+        cause: err instanceof Error ? err : new Error(String(err)),
+      }));
       this.sendProblemReport(msg, err as Error);
     }
   }
@@ -290,9 +346,24 @@ export class Layr8Client extends EventEmitter {
     };
   }
 
+  private async sendMessageAcked(msg: InternalMessage): Promise<void> {
+    if (!this.channel) throw new NotConnectedError();
+    const data = marshalDIDComm(msg);
+    const reply = await this.channel.send("message", JSON.parse(data));
+    if (reply.status === "error") {
+      throw new Error(reply.reason || `server rejected message: ${reply.status}`);
+    }
+  }
+
+  private sendMessageFireAndForget(msg: InternalMessage): void {
+    if (!this.channel) throw new NotConnectedError();
+    const data = marshalDIDComm(msg);
+    this.channel.sendFireAndForget("message", JSON.parse(data));
+  }
+
   private sendMessage(msg: InternalMessage): void {
     if (!this.channel) throw new NotConnectedError();
     const data = marshalDIDComm(msg);
-    this.channel.send("message", JSON.parse(data));
+    this.channel.sendFireAndForget("message", JSON.parse(data));
   }
 }

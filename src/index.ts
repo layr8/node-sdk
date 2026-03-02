@@ -1,5 +1,5 @@
 export { Layr8Client } from "./client.js";
-export type { RequestOptions } from "./client.js";
+export type { RequestOptions, SendOptions } from "./client.js";
 export type { Config } from "./config.js";
 export type {
   Message,
@@ -20,4 +20,9 @@ export {
   ClientClosedError,
   ProblemReportError,
   ConnectionError,
+  ErrorKind,
+  SDKError,
+  logErrors,
 } from "./errors.js";
+export type { ErrorHandler } from "./errors.js";
+export type { ServerReply } from "./channel.js";
