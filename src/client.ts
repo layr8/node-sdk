@@ -8,6 +8,7 @@ import {
   NotConnectedError,
   ProblemReportError,
   SDKError,
+  ServerRejectError,
 } from "./errors.js";
 import type { ErrorHandler } from "./errors.js";
 import type { HandlerFn, HandlerOptions } from "./handler.js";
@@ -230,7 +231,7 @@ export class Layr8Client extends EventEmitter {
         .then((reply) => {
           if (reply.status === "error") {
             cleanup();
-            reject(new Error(reply.reason || `server rejected message: ${reply.status}`));
+            reject(new ServerRejectError(reply.reason || reply.status));
             return;
           }
           // Server accepted, keep waiting for DIDComm response
@@ -277,7 +278,12 @@ export class Layr8Client extends EventEmitter {
 
     // Auto-ack before handler (unless manual ack)
     if (!entry.manualAck) {
-      this.channel!.sendAck([msg.id]);
+      try {
+        this.channel!.sendAck([msg.id]);
+      } catch {
+        // Best-effort: swallow write failures on auto-ack to avoid
+        // unhandled exceptions in the inbound message callback path.
+      }
     } else {
       msg.ackFn = (id: string) => {
         this.channel!.sendAck([id]);
@@ -292,11 +298,25 @@ export class Layr8Client extends EventEmitter {
     fn: HandlerFn,
     msg: InternalMessage,
   ): Promise<void> {
-    try {
-      const resp = await fn(msg);
+    let resp: Partial<Message> | null | undefined;
 
-      if (resp) {
-        // Auto-fill response fields
+    // 1. Run the handler — failures are HandlerException
+    try {
+      resp = await fn(msg);
+    } catch (err) {
+      this.onError(new SDKError(ErrorKind.HandlerException, {
+        messageId: msg.id,
+        type: msg.type,
+        from: msg.from,
+        cause: err instanceof Error ? err : new Error(String(err)),
+      }));
+      this.sendProblemReport(msg, err instanceof Error ? err : new Error(String(err)));
+      return;
+    }
+
+    // 2. Send the response — failures are TransportWrite
+    if (resp) {
+      try {
         const internal = this.fillMessage(resp);
         if (!internal.to.length && msg.from) {
           internal.to = [msg.from];
@@ -305,33 +325,37 @@ export class Layr8Client extends EventEmitter {
           internal.threadId = msg.threadId || msg.id;
         }
         this.sendMessage(internal);
+      } catch (err) {
+        this.onError(new SDKError(ErrorKind.TransportWrite, {
+          messageId: msg.id,
+          type: msg.type,
+          from: msg.from,
+          cause: err instanceof Error ? err : new Error(String(err)),
+        }));
       }
-    } catch (err) {
-      this.onError(new SDKError(ErrorKind.HandlerException, {
-        messageId: msg.id,
-        type: msg.type,
-        from: msg.from,
-        cause: err instanceof Error ? err : new Error(String(err)),
-      }));
-      this.sendProblemReport(msg, err as Error);
     }
   }
 
   private sendProblemReport(original: InternalMessage, err: Error): void {
-    const threadId = original.threadId || original.id;
-    const report: InternalMessage = {
-      id: generateId(),
-      type: "https://didcomm.org/report-problem/2.0/problem-report",
-      from: this.agentDid,
-      to: original.from ? [original.from] : [],
-      threadId,
-      parentThreadId: "",
-      body: {
-        code: "e.p.xfer.cant-process",
-        comment: err.message,
-      },
-    };
-    this.sendMessage(report);
+    try {
+      const threadId = original.threadId || original.id;
+      const report: InternalMessage = {
+        id: generateId(),
+        type: "https://didcomm.org/report-problem/2.0/problem-report",
+        from: this.agentDid,
+        to: original.from ? [original.from] : [],
+        threadId,
+        parentThreadId: "",
+        body: {
+          code: "e.p.xfer.cant-process",
+          comment: err.message,
+        },
+      };
+      this.sendMessage(report);
+    } catch {
+      // Best-effort: if we can't send the problem report (e.g., connection
+      // lost), swallow the error to avoid masking the original handler failure.
+    }
   }
 
   private fillMessage(msg: Partial<Message>): InternalMessage {
@@ -351,7 +375,7 @@ export class Layr8Client extends EventEmitter {
     const data = marshalDIDComm(msg);
     const reply = await this.channel.send("message", JSON.parse(data));
     if (reply.status === "error") {
-      throw new Error(reply.reason || `server rejected message: ${reply.status}`);
+      throw new ServerRejectError(reply.reason || reply.status);
     }
   }
 

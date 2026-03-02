@@ -20,6 +20,7 @@ export {
   ClientClosedError,
   ProblemReportError,
   ConnectionError,
+  ServerRejectError,
   ErrorKind,
   SDKError,
   logErrors,

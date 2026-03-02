@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { WebSocketServer, WebSocket as WS } from "ws";
 import { IncomingMessage } from "node:http";
-import { Layr8Client, unmarshalBody, ProblemReportError, logErrors } from "../src/index.js";
+import { Layr8Client, unmarshalBody, ProblemReportError, ServerRejectError, logErrors } from "../src/index.js";
 import type { Message, ErrorHandler } from "../src/index.js";
 import { ErrorKind, SDKError } from "../src/index.js";
 
@@ -744,9 +744,15 @@ describe("Layr8Client", () => {
     await client.connect();
 
     // Server reject error is returned to the caller, not reported via onError
-    await expect(client.send({
-      type: "https://didcomm.org/basicmessage/2.0/message", to: ["did:web:bob"], body: {},
-    })).rejects.toThrow(/not_authorized/);
+    try {
+      await client.send({
+        type: "https://didcomm.org/basicmessage/2.0/message", to: ["did:web:bob"], body: {},
+      });
+      expect.fail("should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ServerRejectError);
+      expect((err as ServerRejectError).reason).toBe("not_authorized");
+    }
 
     expect(errors.some(e => e.kind === ErrorKind.ServerReject)).toBe(false);
     await client.close();

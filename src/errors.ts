@@ -59,6 +59,17 @@ export class ConnectionError extends Layr8Error {
   }
 }
 
+/** Thrown when the server rejects a message (e.g., authorization failure). */
+export class ServerRejectError extends Layr8Error {
+  readonly reason: string;
+
+  constructor(reason: string) {
+    super(`server rejected message: ${reason}`);
+    this.name = "ServerRejectError";
+    this.reason = reason;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Poka-yoke structured error types
 // ---------------------------------------------------------------------------
