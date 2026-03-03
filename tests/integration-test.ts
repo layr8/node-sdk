@@ -300,7 +300,7 @@ async function main(): Promise<void> {
 
     if (signedCred) {
       try {
-        const signedPres = await alice.signPresentation([signedCred]);
+        const signedPres = await alice.signPresentation([signedCred], { nonce: "test-nonce" });
         if (!signedPres || signedPres.length === 0) {
           fail("signPresentation", "returned empty string");
         } else {
