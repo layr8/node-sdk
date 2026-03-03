@@ -1,6 +1,21 @@
 import { EventEmitter } from "node:events";
 import type { Config } from "./config.js";
 import { resolveConfig } from "./config.js";
+import type {
+  Credential,
+  CredentialFormat,
+  SignCredentialOptions,
+  VerifiedCredential,
+  VerifyCredentialOptions,
+  StoreCredentialOptions,
+  StoredCredential,
+  ListCredentialsOptions,
+} from "./credentials.js";
+import type {
+  SignPresentationOptions,
+  VerifiedPresentation,
+  VerifyPresentationOptions,
+} from "./presentations.js";
 import {
   AlreadyConnectedError,
   ClientClosedError,
@@ -20,6 +35,7 @@ import {
   parseDIDComm,
 } from "./message.js";
 import { PhoenixChannel } from "./channel.js";
+import { RestClient, restUrlFromWebSocket } from "./rest.js";
 
 /** Options for request(). */
 export interface RequestOptions {
@@ -50,6 +66,7 @@ export class Layr8Client extends EventEmitter {
   private connected = false;
   private isClosed = false;
   private agentDid: string;
+  private readonly rest: RestClient;
 
   /** Correlation map for Request/Response pattern: threadId → {resolve, reject} */
   private readonly pending = new Map<
@@ -67,6 +84,10 @@ export class Layr8Client extends EventEmitter {
     this.onError = onError;
     this.cfg = resolveConfig(cfg);
     this.agentDid = this.cfg.agentDid;
+    this.rest = new RestClient(
+      restUrlFromWebSocket(this.cfg.nodeUrl),
+      this.cfg.apiKey,
+    );
   }
 
   /** The agent's DID — either provided in Config or assigned by the node on connect(). */
@@ -241,6 +262,139 @@ export class Layr8Client extends EventEmitter {
           reject(err);
         });
     });
+  }
+
+  // --- W3C Verifiable Credential APIs (REST, no WebSocket required) ---
+
+  /**
+   * Sign a W3C Verifiable Credential using the issuer's assertion key.
+   * Defaults: issuer = client.did, format = "compact_jwt".
+   */
+  async signCredential(
+    credential: Credential,
+    options?: SignCredentialOptions,
+  ): Promise<string> {
+    const body: Record<string, unknown> = {
+      credential,
+      issuer_did: options?.issuerDid ?? this.agentDid,
+      format: options?.format ?? "compact_jwt",
+    };
+
+    const result = await this.rest.post<{ signed_credential: string }>(
+      "/api/v1/credentials/sign",
+      body,
+    );
+    return result.signed_credential;
+  }
+
+  /**
+   * Verify a signed credential using the verifier DID's assertion key.
+   * Defaults: verifier = client.did.
+   */
+  async verifyCredential(
+    signedCredential: string,
+    options?: VerifyCredentialOptions,
+  ): Promise<VerifiedCredential> {
+    const body: Record<string, unknown> = {
+      signed_credential: signedCredential,
+      verifier_did: options?.verifierDid ?? this.agentDid,
+    };
+
+    return this.rest.post<VerifiedCredential>(
+      "/api/v1/credentials/verify",
+      body,
+    );
+  }
+
+  /**
+   * Store a signed credential JWT for a holder.
+   * Defaults: holder = client.did.
+   */
+  async storeCredential(
+    credentialJwt: string,
+    options?: StoreCredentialOptions,
+  ): Promise<StoredCredential> {
+    const body: Record<string, unknown> = {
+      holder_did: options?.holderDid ?? this.agentDid,
+      credential_jwt: credentialJwt,
+    };
+    if (options?.issuerDid) {
+      body.issuer_did = options.issuerDid;
+    }
+    if (options?.validUntil) {
+      body.valid_until = options.validUntil.toISOString();
+    }
+
+    return this.rest.post<StoredCredential>("/api/v1/credentials", body);
+  }
+
+  /**
+   * List all stored credentials for a holder.
+   * Defaults: holder = client.did.
+   */
+  async listCredentials(
+    options?: ListCredentialsOptions,
+  ): Promise<StoredCredential[]> {
+    const holderDid = options?.holderDid ?? this.agentDid;
+    const path =
+      "/api/v1/credentials?holder_did=" + encodeURIComponent(holderDid);
+
+    const result = await this.rest.get<{ credentials: StoredCredential[] }>(
+      path,
+    );
+    return result.credentials;
+  }
+
+  /** Retrieve a stored credential by ID. */
+  async getCredential(credentialId: string): Promise<StoredCredential> {
+    const path = "/api/v1/credentials/" + encodeURIComponent(credentialId);
+    return this.rest.get<StoredCredential>(path);
+  }
+
+  // --- W3C Verifiable Presentation APIs (REST, no WebSocket required) ---
+
+  /**
+   * Sign a W3C Verifiable Presentation wrapping one or more signed credentials.
+   * Uses the holder's authentication key (not assertion key).
+   * Defaults: holder = client.did, format = "compact_jwt".
+   */
+  async signPresentation(
+    credentials: string[],
+    options?: SignPresentationOptions,
+  ): Promise<string> {
+    const body: Record<string, unknown> = {
+      credentials,
+      holder_did: options?.holderDid ?? this.agentDid,
+      format: options?.format ?? "compact_jwt",
+    };
+    if (options?.nonce) {
+      body.nonce = options.nonce;
+    }
+
+    const result = await this.rest.post<{ signed_presentation: string }>(
+      "/api/v1/presentations/sign",
+      body,
+    );
+    return result.signed_presentation;
+  }
+
+  /**
+   * Verify a signed presentation using the verifier DID's authentication key.
+   * Defaults: verifier = client.did.
+   */
+  async verifyPresentation(
+    signedPresentation: string,
+    options?: VerifyPresentationOptions,
+  ): Promise<VerifiedPresentation> {
+    const body: Record<string, unknown> = {
+      signed_presentation: signedPresentation,
+      verifier_did: options?.verifierDid ?? this.agentDid,
+    };
+
+    return this.rest.post<VerifiedPresentation>(
+      "/api/v1/presentations/verify",
+      body,
+    );
   }
 
   private handleInboundMessage(payload: unknown): void {
