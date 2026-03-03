@@ -403,6 +403,86 @@ try {
 | `ProblemReportError` | Remote handler returned an error (`.code`, `.comment`) |
 | `ConnectionError` | Failed to connect to cloud-node (`.url`, `.reason`) |
 
+## W3C Verifiable Credentials
+
+The SDK provides methods for signing, verifying, storing, listing, and retrieving [W3C Verifiable Credentials](https://www.w3.org/TR/vc-data-model-2.0/). These operations use the cloud-node's REST API and the DID keys in the node's wallet.
+
+### Sign a Credential
+
+```typescript
+import type { Credential } from "@layr8/sdk";
+
+const cred: Credential = {
+  "@context": ["https://www.w3.org/ns/credentials/v2"],
+  id: "urn:uuid:my-credential",
+  type: ["VerifiableCredential"],
+  issuer: client.did,
+  credentialSubject: { id: "did:web:example:holder", name: "Alice" },
+};
+
+const signedJWT = await client.signCredential(cred);
+```
+
+Options: `{ issuerDid, format }`.
+
+### Verify a Credential
+
+```typescript
+const verified = await client.verifyCredential(signedJWT);
+console.log(verified.credential); // decoded credential claims
+console.log(verified.headers);    // JWT headers (alg, kid, etc.)
+```
+
+Options: `{ verifierDid }`.
+
+> **Note:** The verifier DID must have keys in the local node's wallet. Cross-node verification is not currently supported.
+
+### Store, List, Get
+
+```typescript
+// Store a signed credential
+const stored = await client.storeCredential(signedJWT);
+console.log(stored.id); // storage ID
+
+// List all stored credentials
+const creds = await client.listCredentials();
+
+// Retrieve by ID
+const fetched = await client.getCredential(stored.id);
+console.log(fetched.credential_jwt); // the original signed JWT
+```
+
+Store options: `{ holderDid, issuerDid, validUntil }`.
+List options: `{ holderDid }`.
+
+### Output Formats
+
+The `format` option accepts: `"compact_jwt"` (default), `"json"`, `"jwt"`, `"enveloped"`.
+
+## W3C Verifiable Presentations
+
+Presentations wrap one or more signed credentials into a holder-signed envelope.
+
+### Sign a Presentation
+
+```typescript
+const signedPres = await client.signPresentation([signedJWT], {
+  nonce: "challenge-from-verifier",
+});
+```
+
+Options: `{ holderDid, format, nonce }`.
+
+### Verify a Presentation
+
+```typescript
+const verified = await client.verifyPresentation(signedPres);
+console.log(verified.presentation); // decoded presentation claims
+console.log(verified.headers);      // JWT headers
+```
+
+Options: `{ verifierDid }`.
+
 ## Examples
 
 The [examples/](examples/) directory contains complete, runnable agents:
