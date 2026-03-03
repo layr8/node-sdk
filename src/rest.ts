@@ -4,6 +4,29 @@
  * Handles JSON serialization, API key authentication, and localhost resolution.
  */
 
+/** Check whether a hostname is localhost or a subdomain of it (RFC 6761). */
+function isLocalhost(hostname: string): boolean {
+  return hostname === "localhost" || hostname.endsWith(".localhost");
+}
+
+/**
+ * Resolve a URL for localhost subdomains (e.g., alice-test.localhost → 127.0.0.1).
+ * Returns the resolved URL and an optional Host header for the original hostname.
+ */
+function resolveLocalhostUrl(url: string): { url: string; host?: string } {
+  try {
+    const parsed = new URL(url);
+    if (isLocalhost(parsed.hostname)) {
+      const host = parsed.host;
+      parsed.hostname = "127.0.0.1";
+      return { url: parsed.toString().replace(/\/$/, ""), host };
+    }
+  } catch {
+    // Not a valid URL, return as-is
+  }
+  return { url };
+}
+
 /**
  * Derive the HTTP base URL from a WebSocket URL.
  *
@@ -64,14 +87,18 @@ export class RestClient {
 
   /** Send a JSON POST request and return the decoded response. */
   async post<T>(path: string, body: unknown): Promise<T> {
+    const { url, host } = resolveLocalhostUrl(this.baseUrl + path);
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
     };
+    if (host) {
+      headers["Host"] = host;
+    }
     if (this.apiKey) {
       headers["x-api-key"] = this.apiKey;
     }
 
-    const resp = await fetch(this.baseUrl + path, {
+    const resp = await fetch(url, {
       method: "POST",
       headers,
       body: JSON.stringify(body),
@@ -91,12 +118,16 @@ export class RestClient {
 
   /** Send a GET request and return the decoded response. */
   async get<T>(path: string): Promise<T> {
+    const { url, host } = resolveLocalhostUrl(this.baseUrl + path);
     const headers: Record<string, string> = {};
+    if (host) {
+      headers["Host"] = host;
+    }
     if (this.apiKey) {
       headers["x-api-key"] = this.apiKey;
     }
 
-    const resp = await fetch(this.baseUrl + path, {
+    const resp = await fetch(url, {
       method: "GET",
       headers,
     });
