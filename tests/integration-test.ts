@@ -208,7 +208,9 @@ async function main(): Promise<void> {
     try {
       const cred: Credential = {
         "@context": ["https://www.w3.org/ns/credentials/v2"],
+        id: `urn:uuid:test-cred-${testId}`,
         type: ["VerifiableCredential"],
+        issuer: aliceDid,
         credentialSubject: { id: bobDid, name: "Bob Test User" },
       };
 

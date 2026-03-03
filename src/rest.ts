@@ -2,29 +2,17 @@
  * Internal REST client for the Layr8 cloud-node HTTP API.
  *
  * Handles JSON serialization, API key authentication, and localhost resolution.
+ *
+ * Uses Node's http/https modules instead of fetch because fetch (undici) does
+ * not honor custom Host headers — required for *.localhost resolution (RFC 6761).
  */
+
+import http from "node:http";
+import https from "node:https";
 
 /** Check whether a hostname is localhost or a subdomain of it (RFC 6761). */
 function isLocalhost(hostname: string): boolean {
   return hostname === "localhost" || hostname.endsWith(".localhost");
-}
-
-/**
- * Resolve a URL for localhost subdomains (e.g., alice-test.localhost → 127.0.0.1).
- * Returns the resolved URL and an optional Host header for the original hostname.
- */
-function resolveLocalhostUrl(url: string): { url: string; host?: string } {
-  try {
-    const parsed = new URL(url);
-    if (isLocalhost(parsed.hostname)) {
-      const host = parsed.host;
-      parsed.hostname = "127.0.0.1";
-      return { url: parsed.toString().replace(/\/$/, ""), host };
-    }
-  } catch {
-    // Not a valid URL, return as-is
-  }
-  return { url };
 }
 
 /**
@@ -87,61 +75,85 @@ export class RestClient {
 
   /** Send a JSON POST request and return the decoded response. */
   async post<T>(path: string, body: unknown): Promise<T> {
-    const { url, host } = resolveLocalhostUrl(this.baseUrl + path);
+    const data = JSON.stringify(body);
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
+      "Content-Length": String(Buffer.byteLength(data)),
     };
-    if (host) {
-      headers["Host"] = host;
-    }
     if (this.apiKey) {
       headers["x-api-key"] = this.apiKey;
     }
-
-    const resp = await fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-    });
-
-    const respBody = await resp.text();
-
-    if (resp.status >= 400) {
-      throw parseRESTError(resp.status, respBody);
-    }
-
-    if (respBody.length > 0) {
-      return JSON.parse(respBody) as T;
-    }
-    return undefined as unknown as T;
+    return this.request<T>("POST", path, headers, data);
   }
 
   /** Send a GET request and return the decoded response. */
   async get<T>(path: string): Promise<T> {
-    const { url, host } = resolveLocalhostUrl(this.baseUrl + path);
     const headers: Record<string, string> = {};
-    if (host) {
-      headers["Host"] = host;
-    }
     if (this.apiKey) {
       headers["x-api-key"] = this.apiKey;
     }
+    return this.request<T>("GET", path, headers);
+  }
 
-    const resp = await fetch(url, {
-      method: "GET",
-      headers,
+  /** Execute an HTTP request using node:http with localhost resolution (RFC 6761). */
+  private request<T>(
+    method: string,
+    path: string,
+    headers: Record<string, string>,
+    body?: string,
+  ): Promise<T> {
+    const parsed = new URL(this.baseUrl + path);
+    const isHttps = parsed.protocol === "https:";
+    const mod = isHttps ? https : http;
+
+    // Resolve *.localhost to 127.0.0.1, preserving the original Host header.
+    let hostname = parsed.hostname;
+    if (isLocalhost(hostname)) {
+      headers["Host"] = parsed.host;
+      hostname = "127.0.0.1";
+    }
+
+    return new Promise<T>((resolve, reject) => {
+      const req = mod.request(
+        {
+          hostname,
+          port: parsed.port || (isHttps ? 443 : 80),
+          path: parsed.pathname + parsed.search,
+          method,
+          headers,
+        },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on("data", (chunk: Buffer) => chunks.push(chunk));
+          res.on("end", () => {
+            const respBody = Buffer.concat(chunks).toString("utf-8");
+            const status = res.statusCode ?? 0;
+
+            if (status >= 400) {
+              reject(parseRESTError(status, respBody));
+              return;
+            }
+
+            if (respBody.length > 0) {
+              try {
+                resolve(JSON.parse(respBody) as T);
+              } catch {
+                reject(new Error(`Invalid JSON response: ${respBody}`));
+              }
+            } else {
+              resolve(undefined as unknown as T);
+            }
+          });
+        },
+      );
+
+      req.on("error", reject);
+
+      if (body) {
+        req.write(body);
+      }
+      req.end();
     });
-
-    const respBody = await resp.text();
-
-    if (resp.status >= 400) {
-      throw parseRESTError(resp.status, respBody);
-    }
-
-    if (respBody.length > 0) {
-      return JSON.parse(respBody) as T;
-    }
-    return undefined as unknown as T;
   }
 }
 
