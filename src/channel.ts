@@ -1,4 +1,5 @@
 import WebSocket from "ws";
+import { Backoff } from "./backoff.js";
 import { ConnectionError, NotConnectedError } from "./errors.js";
 
 /**
@@ -79,6 +80,8 @@ export class PhoenixChannel {
   private callbacks: ChannelCallbacks;
   private pendingJoinResolve: ((payload: unknown) => void) | null = null;
   private closed = false;
+  private reconnecting = false;
+  private protocols: string[] = [];
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private assignedDIDVal = "";
   private readonly pendingRefs = new Map<string, {
@@ -98,6 +101,13 @@ export class PhoenixChannel {
   }
 
   async connect(protocols: string[], signal?: AbortSignal): Promise<void> {
+    this.protocols = protocols;
+    return this.dial(signal);
+  }
+
+  private async dial(signal?: AbortSignal): Promise<void> {
+    this.refCounter = 0;
+
     const parsed = new URL(this.wsUrl);
     parsed.searchParams.set("api_key", this.apiKey);
     parsed.searchParams.set("vsn", "2.0.0");
@@ -137,7 +147,7 @@ export class PhoenixChannel {
         this.startHeartbeat();
 
         try {
-          await this.join(protocols, signal);
+          await this.join(this.protocols, signal);
           resolve();
         } catch (err) {
           ws.close();
@@ -208,6 +218,9 @@ export class PhoenixChannel {
   }
 
   send(event: string, payload: unknown): Promise<ServerReply> {
+    if (this.reconnecting) {
+      return Promise.reject(new NotConnectedError());
+    }
     const ref = this.nextRef();
 
     return new Promise<ServerReply>((resolve, reject) => {
@@ -250,6 +263,9 @@ export class PhoenixChannel {
   }
 
   sendFireAndForget(event: string, payload: unknown): void {
+    if (this.reconnecting) {
+      throw new NotConnectedError();
+    }
     this.writeMsg({
       joinRef: null,
       ref: this.nextRef(),
@@ -270,6 +286,7 @@ export class PhoenixChannel {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.reconnecting = false;
 
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
@@ -315,14 +332,22 @@ export class PhoenixChannel {
     });
 
     this.ws.on("close", () => {
-      if (!this.closed && this.callbacks.onDisconnect) {
-        this.callbacks.onDisconnect(new Error("WebSocket closed"));
+      if (!this.closed) {
+        this.rejectPendingRefs();
+        if (this.callbacks.onDisconnect) {
+          this.callbacks.onDisconnect(new Error("WebSocket closed"));
+        }
+        this.reconnectLoop();
       }
     });
 
     this.ws.on("error", (err) => {
-      if (!this.closed && this.callbacks.onDisconnect) {
-        this.callbacks.onDisconnect(err as Error);
+      if (!this.closed) {
+        this.rejectPendingRefs();
+        if (this.callbacks.onDisconnect) {
+          this.callbacks.onDisconnect(err as Error);
+        }
+        this.reconnectLoop();
       }
     });
   }
@@ -377,6 +402,51 @@ export class PhoenixChannel {
         // heartbeat write failed — connection likely dead
       }
     }, 30_000);
+  }
+
+  private async reconnectLoop(): Promise<void> {
+    if (this.reconnecting) return;
+    this.reconnecting = true;
+
+    // Close existing ws
+    if (this.ws) {
+      this.ws.removeAllListeners();
+      this.ws.close();
+      this.ws = null;
+    }
+
+    // Stop heartbeat
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+
+    const bo = new Backoff(1000, 30000);
+
+    while (!this.closed) {
+      const delay = bo.next();
+      await new Promise(resolve => setTimeout(resolve, delay));
+      if (this.closed) return;
+
+      try {
+        await this.dial();
+        this.reconnecting = false;
+        if (this.callbacks.onReconnect) {
+          this.callbacks.onReconnect();
+        }
+        return;
+      } catch {
+        // will retry
+      }
+    }
+  }
+
+  private rejectPendingRefs(): void {
+    for (const [, pending] of this.pendingRefs) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error("disconnected"));
+    }
+    this.pendingRefs.clear();
   }
 
   private nextRef(): string {

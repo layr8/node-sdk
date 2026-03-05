@@ -245,7 +245,13 @@ try {
 }
 ```
 
-## Connection Events
+## Connection Resilience
+
+The SDK automatically reconnects when the WebSocket connection drops (node restart, network interruption). Reconnection uses exponential backoff (1s → 2s → 4s → ... → 30s max).
+
+During reconnection:
+- `send()`, `request()`, and other operations throw `NotConnectedError` immediately — no message queuing
+- `close()` stops the reconnect loop
 
 ```typescript
 client.on("disconnect", (err: Error) => {
@@ -256,7 +262,7 @@ client.on("reconnect", () => {
 });
 ```
 
-Note: `disconnect` fires only on unexpected drops, not on `close()`.
+`disconnect` fires only on unexpected drops, not on `close()`.
 
 ## DID and Protocol Conventions
 

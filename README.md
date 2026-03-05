@@ -255,9 +255,15 @@ await client.connect();
 console.log(client.did); // "did:web:myorg:abc123" (assigned by node)
 ```
 
-### Disconnect and Reconnect Events
+### Connection Resilience
 
-Monitor connection state with events:
+The SDK automatically reconnects when the WebSocket connection drops (e.g., node restart, network interruption). Reconnection uses exponential backoff starting at 1 second, capped at 30 seconds.
+
+During reconnection:
+- `send()`, `request()`, and other operations throw `NotConnectedError` immediately — the SDK does not queue messages
+- The `disconnect` event fires when the connection drops
+- The `reconnect` event fires when the connection is restored
+- `close()` stops the reconnect loop
 
 ```typescript
 client.on("disconnect", (err: Error) => {
