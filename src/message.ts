@@ -4,14 +4,19 @@ import { v4 as uuidv4 } from "uuid";
 export interface MessageContext {
   recipient: string;
   authorized: boolean;
-  senderCredentials: Credential[];
+  senderCredentials: SenderCredential[];
 }
 
 /** A sender credential from the cloud-node. */
-export interface Credential {
+export interface SenderCredential {
   id: string;
   name: string;
 }
+
+/**
+ * @deprecated Use {@link SenderCredential} instead. This alias exists for backwards compatibility.
+ */
+export type Credential = SenderCredential;
 
 /** A DIDComm v2 message. */
 export interface Message {
@@ -132,7 +137,7 @@ export function parseDIDComm(data: unknown): InternalMessage {
   };
 
   if (env.context) {
-    const creds: Credential[] = (env.context.sender_credentials || []).map(
+    const creds: SenderCredential[] = (env.context.sender_credentials || []).map(
       (c) => ({
         id: c.credential_subject.id,
         name: c.credential_subject.name,

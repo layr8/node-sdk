@@ -12,7 +12,7 @@
  */
 
 import { appendFileSync } from "node:fs";
-import { Layr8Client, ack } from "../src/index.js";
+import { Layr8Client, ack, logErrors } from "../src/index.js";
 import type { Message } from "../src/index.js";
 
 const FILE_PATH = "messages.jsonl";
@@ -22,7 +22,7 @@ function log(msg: string): void {
   console.log(`${ts} ${msg}`);
 }
 
-const client = new Layr8Client({});
+const client = new Layr8Client(logErrors());
 
 client.handle(
   "https://layr8.io/protocols/order/1.0/created",

@@ -1,4 +1,5 @@
 import WebSocket from "ws";
+import { Backoff } from "./backoff.js";
 import { ConnectionError, NotConnectedError } from "./errors.js";
 
 /**
@@ -55,6 +56,12 @@ function rewriteLocalhostUrl(wsUrl: string): [string, string | undefined] {
   return [wsUrl, undefined];
 }
 
+/** Server reply received for a tracked message ref. */
+export interface ServerReply {
+  status: string;
+  reason: string;
+}
+
 export interface ChannelCallbacks {
   onMessage: (payload: unknown) => void;
   onDisconnect?: (err: Error) => void;
@@ -73,8 +80,15 @@ export class PhoenixChannel {
   private callbacks: ChannelCallbacks;
   private pendingJoinResolve: ((payload: unknown) => void) | null = null;
   private closed = false;
+  private reconnecting = false;
+  private protocols: string[] = [];
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private assignedDIDVal = "";
+  private readonly pendingRefs = new Map<string, {
+    resolve: (reply: ServerReply) => void;
+    reject: (err: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }>();
 
   constructor(
     private readonly wsUrl: string,
@@ -87,6 +101,13 @@ export class PhoenixChannel {
   }
 
   async connect(protocols: string[], signal?: AbortSignal): Promise<void> {
+    this.protocols = protocols;
+    return this.dial(signal);
+  }
+
+  private async dial(signal?: AbortSignal): Promise<void> {
+    this.refCounter = 0;
+
     const parsed = new URL(this.wsUrl);
     parsed.searchParams.set("api_key", this.apiKey);
     parsed.searchParams.set("vsn", "2.0.0");
@@ -126,7 +147,7 @@ export class PhoenixChannel {
         this.startHeartbeat();
 
         try {
-          await this.join(protocols, signal);
+          await this.join(this.protocols, signal);
           resolve();
         } catch (err) {
           ws.close();
@@ -196,7 +217,55 @@ export class PhoenixChannel {
     });
   }
 
-  send(event: string, payload: unknown): void {
+  send(event: string, payload: unknown): Promise<ServerReply> {
+    if (this.reconnecting) {
+      return Promise.reject(new NotConnectedError());
+    }
+    const ref = this.nextRef();
+
+    return new Promise<ServerReply>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const pending = this.pendingRefs.get(ref);
+        if (pending) {
+          this.pendingRefs.delete(ref);
+          reject(new Error("server reply timeout"));
+        }
+      }, 15_000); // 15 second timeout for server reply
+
+      this.pendingRefs.set(ref, {
+        resolve: (reply) => {
+          clearTimeout(timer);
+          this.pendingRefs.delete(ref);
+          resolve(reply);
+        },
+        reject: (err) => {
+          clearTimeout(timer);
+          this.pendingRefs.delete(ref);
+          reject(err);
+        },
+        timer,
+      });
+
+      try {
+        this.writeMsg({
+          joinRef: null,
+          ref,
+          topic: this.topic,
+          event,
+          payload,
+        });
+      } catch (err) {
+        clearTimeout(timer);
+        this.pendingRefs.delete(ref);
+        reject(err);
+      }
+    });
+  }
+
+  sendFireAndForget(event: string, payload: unknown): void {
+    if (this.reconnecting) {
+      throw new NotConnectedError();
+    }
     this.writeMsg({
       joinRef: null,
       ref: this.nextRef(),
@@ -207,7 +276,7 @@ export class PhoenixChannel {
   }
 
   sendAck(ids: string[]): void {
-    this.send("ack", { ids });
+    this.sendFireAndForget("ack", { ids });
   }
 
   assignedDID(): string {
@@ -217,11 +286,19 @@ export class PhoenixChannel {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.reconnecting = false;
 
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
     }
+
+    // Reject all pending refs
+    for (const [ref, pending] of this.pendingRefs) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error("channel closed"));
+    }
+    this.pendingRefs.clear();
 
     if (this.ws) {
       // Send phx_leave before closing
@@ -249,19 +326,28 @@ export class PhoenixChannel {
         const msg = unmarshalPhoenixMsg(data.toString());
         this.handleInbound(msg);
       } catch {
-        // silently drop unparseable messages
+        // Phoenix wire format parse failure — not a DIDComm error.
+        // Transport-level noise (e.g., truncated frames), matches Go SDK behavior.
       }
     });
 
     this.ws.on("close", () => {
-      if (!this.closed && this.callbacks.onDisconnect) {
-        this.callbacks.onDisconnect(new Error("WebSocket closed"));
+      if (!this.closed) {
+        this.rejectPendingRefs();
+        if (this.callbacks.onDisconnect) {
+          this.callbacks.onDisconnect(new Error("WebSocket closed"));
+        }
+        this.reconnectLoop();
       }
     });
 
     this.ws.on("error", (err) => {
-      if (!this.closed && this.callbacks.onDisconnect) {
-        this.callbacks.onDisconnect(err as Error);
+      if (!this.closed) {
+        this.rejectPendingRefs();
+        if (this.callbacks.onDisconnect) {
+          this.callbacks.onDisconnect(err as Error);
+        }
+        this.reconnectLoop();
       }
     });
   }
@@ -269,10 +355,24 @@ export class PhoenixChannel {
   private handleInbound(msg: PhoenixMessage): void {
     switch (msg.event) {
       case "phx_reply":
+        // Join reply
         if (this.pendingJoinResolve && msg.ref === this.joinRef) {
           const resolve = this.pendingJoinResolve;
           this.pendingJoinResolve = null;
           resolve(msg.payload);
+          return;
+        }
+
+        // Message send reply (ref tracking)
+        if (msg.ref) {
+          const pending = this.pendingRefs.get(msg.ref);
+          if (pending) {
+            const reply = msg.payload as { status?: string; response?: { reason?: string } };
+            pending.resolve({
+              status: reply?.status ?? "",
+              reason: reply?.response?.reason ?? "",
+            });
+          }
         }
         break;
       case "message":
@@ -302,6 +402,51 @@ export class PhoenixChannel {
         // heartbeat write failed — connection likely dead
       }
     }, 30_000);
+  }
+
+  private async reconnectLoop(): Promise<void> {
+    if (this.reconnecting) return;
+    this.reconnecting = true;
+
+    // Close existing ws
+    if (this.ws) {
+      this.ws.removeAllListeners();
+      this.ws.close();
+      this.ws = null;
+    }
+
+    // Stop heartbeat
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+
+    const bo = new Backoff(1000, 30000);
+
+    while (!this.closed) {
+      const delay = bo.next();
+      await new Promise(resolve => setTimeout(resolve, delay));
+      if (this.closed) return;
+
+      try {
+        await this.dial();
+        this.reconnecting = false;
+        if (this.callbacks.onReconnect) {
+          this.callbacks.onReconnect();
+        }
+        return;
+      } catch {
+        // will retry
+      }
+    }
+  }
+
+  private rejectPendingRefs(): void {
+    for (const [, pending] of this.pendingRefs) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error("disconnected"));
+    }
+    this.pendingRefs.clear();
   }
 
   private nextRef(): string {

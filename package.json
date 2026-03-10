@@ -16,7 +16,8 @@
     "build": "tsc",
     "test": "vitest run",
     "test:watch": "vitest",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test:integration": "tsx tests/integration-test.ts"
   },
   "engines": {
     "node": ">=20"

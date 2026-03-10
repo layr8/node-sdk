@@ -1,8 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { WebSocketServer, WebSocket as WS } from "ws";
 import { IncomingMessage } from "node:http";
-import { Layr8Client, unmarshalBody, ProblemReportError } from "../src/index.js";
-import type { Message } from "../src/index.js";
+import { Layr8Client, unmarshalBody, ProblemReportError, ServerRejectError, logErrors } from "../src/index.js";
+import type { Message, ErrorHandler } from "../src/index.js";
+import { ErrorKind, SDKError } from "../src/index.js";
+
+/** Discard all errors — used by tests that don't care about error callbacks. */
+const discardErrors: ErrorHandler = () => {};
 
 /** Minimal Phoenix Channel V2 mock server. */
 class MockPhoenixServer {
@@ -71,7 +75,7 @@ async function setupServer(): Promise<MockPhoenixServer> {
   wsUrl = `ws://127.0.0.1:${port}/plugin_socket/websocket`;
   server = new MockPhoenixServer(port);
 
-  // Default: auto-reply to phx_join with ok
+  // Default: auto-reply to phx_join with ok, and ack all other messages
   server.onMsg = (msg) => {
     if (msg.event === "phx_join") {
       server.sendToClient(
@@ -81,6 +85,13 @@ async function setupServer(): Promise<MockPhoenixServer> {
         "phx_reply",
         { status: "ok", response: { did: "did:web:node:test" } },
       );
+      return;
+    }
+    // Reply "ok" to all other messages (server ack)
+    if (msg.ref) {
+      server.sendToClient(null, msg.ref, msg.topic, "phx_reply", {
+        status: "ok", response: {},
+      });
     }
   };
 
@@ -95,7 +106,7 @@ describe("Layr8Client", () => {
   });
 
   it("creates a client with valid config", () => {
-    const client = new Layr8Client({
+    const client = new Layr8Client(discardErrors, {
       nodeUrl: "ws://localhost:4000/plugin_socket/websocket",
       apiKey: "test-key",
       agentDid: "did:web:test",
@@ -104,19 +115,19 @@ describe("Layr8Client", () => {
   });
 
   it("throws when nodeUrl is missing", () => {
-    expect(() => new Layr8Client({ apiKey: "test-key" })).toThrow(
+    expect(() => new Layr8Client(discardErrors, { apiKey: "test-key" })).toThrow(
       /nodeUrl is required/,
     );
   });
 
   it("throws when apiKey is missing", () => {
     expect(
-      () => new Layr8Client({ nodeUrl: "ws://localhost:4000" }),
+      () => new Layr8Client(discardErrors, { nodeUrl: "ws://localhost:4000" }),
     ).toThrow(/apiKey is required/);
   });
 
   it("allows handle() before connect()", () => {
-    const client = new Layr8Client({
+    const client = new Layr8Client(discardErrors, {
       nodeUrl: "ws://localhost:4000",
       apiKey: "test-key",
       agentDid: "did:web:test",
@@ -131,7 +142,7 @@ describe("Layr8Client", () => {
 
   it("rejects handle() after connect()", async () => {
     await setupServer();
-    const client = new Layr8Client({
+    const client = new Layr8Client(discardErrors, {
       nodeUrl: wsUrl,
       apiKey: "test-key",
       agentDid: "did:web:test",
@@ -155,7 +166,7 @@ describe("Layr8Client", () => {
 
   it("connects and closes successfully", async () => {
     await setupServer();
-    const client = new Layr8Client({
+    const client = new Layr8Client(discardErrors, {
       nodeUrl: wsUrl,
       apiKey: "test-key",
       agentDid: "did:web:test",
@@ -166,7 +177,7 @@ describe("Layr8Client", () => {
 
   it("assigns DID from node when agentDid is empty", async () => {
     await setupServer();
-    const client = new Layr8Client({
+    const client = new Layr8Client(discardErrors, {
       nodeUrl: wsUrl,
       apiKey: "test-key",
       agentDid: "",
@@ -178,7 +189,7 @@ describe("Layr8Client", () => {
 
   it("rejects double connect()", async () => {
     await setupServer();
-    const client = new Layr8Client({
+    const client = new Layr8Client(discardErrors, {
       nodeUrl: wsUrl,
       apiKey: "test-key",
       agentDid: "did:web:test",
@@ -194,7 +205,7 @@ describe("Layr8Client", () => {
 
   it("sends a message", async () => {
     await setupServer();
-    const client = new Layr8Client({
+    const client = new Layr8Client(discardErrors, {
       nodeUrl: wsUrl,
       apiKey: "test-key",
       agentDid: "did:web:alice",
@@ -217,7 +228,7 @@ describe("Layr8Client", () => {
   });
 
   it("rejects send() when not connected", async () => {
-    const client = new Layr8Client({
+    const client = new Layr8Client(discardErrors, {
       nodeUrl: "ws://localhost:4000",
       apiKey: "test-key",
       agentDid: "did:web:test",
@@ -239,6 +250,13 @@ describe("Layr8Client", () => {
         return;
       }
       if (msg.event === "message") {
+        // Send server ack first
+        if (msg.ref) {
+          server.sendToClient(null, msg.ref, msg.topic, "phx_reply", {
+            status: "ok", response: {},
+          });
+        }
+        // Then send the DIDComm response
         const outbound = msg.payload as { thid: string; from: string };
         server.sendToClient(null, null, "plugins:did:web:alice", "message", {
           plaintext: {
@@ -253,7 +271,7 @@ describe("Layr8Client", () => {
       }
     };
 
-    const client = new Layr8Client({
+    const client = new Layr8Client(discardErrors, {
       nodeUrl: wsUrl,
       apiKey: "test-key",
       agentDid: "did:web:alice",
@@ -276,7 +294,24 @@ describe("Layr8Client", () => {
 
   it("request() times out via AbortSignal", async () => {
     await setupServer();
-    const client = new Layr8Client({
+
+    // Override to NOT reply to messages (so request times out)
+    server.onMsg = (msg) => {
+      if (msg.event === "phx_join") {
+        server.sendToClient(msg.ref, msg.ref, msg.topic, "phx_reply", {
+          status: "ok", response: {},
+        });
+        return;
+      }
+      // Send server ack but no DIDComm response — request should time out
+      if (msg.ref) {
+        server.sendToClient(null, msg.ref, msg.topic, "phx_reply", {
+          status: "ok", response: {},
+        });
+      }
+    };
+
+    const client = new Layr8Client(discardErrors, {
       nodeUrl: wsUrl,
       apiKey: "test-key",
       agentDid: "did:web:alice",
@@ -310,6 +345,13 @@ describe("Layr8Client", () => {
         return;
       }
       if (msg.event === "message") {
+        // Send server ack first
+        if (msg.ref) {
+          server.sendToClient(null, msg.ref, msg.topic, "phx_reply", {
+            status: "ok", response: {},
+          });
+        }
+        // Then send the problem report
         const outbound = msg.payload as { thid: string };
         server.sendToClient(null, null, "plugins:did:web:alice", "message", {
           plaintext: {
@@ -326,7 +368,7 @@ describe("Layr8Client", () => {
       }
     };
 
-    const client = new Layr8Client({
+    const client = new Layr8Client(discardErrors, {
       nodeUrl: wsUrl,
       apiKey: "test-key",
       agentDid: "did:web:alice",
@@ -352,7 +394,7 @@ describe("Layr8Client", () => {
   it("dispatches inbound messages to handlers", async () => {
     await setupServer();
 
-    const client = new Layr8Client({
+    const client = new Layr8Client(discardErrors, {
       nodeUrl: wsUrl,
       apiKey: "test-key",
       agentDid: "did:web:alice",
@@ -406,7 +448,7 @@ describe("Layr8Client", () => {
   it("auto-fills response fields in handler", async () => {
     await setupServer();
 
-    const client = new Layr8Client({
+    const client = new Layr8Client(discardErrors, {
       nodeUrl: wsUrl,
       apiKey: "test-key",
       agentDid: "did:web:alice",
@@ -462,7 +504,7 @@ describe("Layr8Client", () => {
   it("handler error sends problem report", async () => {
     await setupServer();
 
-    const client = new Layr8Client({
+    const client = new Layr8Client(discardErrors, {
       nodeUrl: wsUrl,
       apiKey: "test-key",
       agentDid: "did:web:alice",
@@ -522,7 +564,7 @@ describe("Layr8Client", () => {
       }
     };
 
-    const client = new Layr8Client({
+    const client = new Layr8Client(discardErrors, {
       nodeUrl: wsUrl,
       apiKey: "test-key",
       agentDid: "did:web:test",
@@ -544,6 +586,13 @@ describe("Layr8Client", () => {
         return;
       }
       if (msg.event === "message") {
+        // Send server ack first
+        if (msg.ref) {
+          server.sendToClient(null, msg.ref, msg.topic, "phx_reply", {
+            status: "ok", response: {},
+          });
+        }
+        // Then send the DIDComm response
         const outbound = msg.payload as {
           thid: string;
           body: { index: number };
@@ -559,7 +608,7 @@ describe("Layr8Client", () => {
       }
     };
 
-    const client = new Layr8Client({
+    const client = new Layr8Client(discardErrors, {
       nodeUrl: wsUrl,
       apiKey: "test-key",
       agentDid: "did:web:alice",
@@ -590,11 +639,122 @@ describe("Layr8Client", () => {
     process.env.LAYR8_NODE_URL = "ws://localhost:4000/plugin_socket/websocket";
     process.env.LAYR8_API_KEY = "test-key";
     try {
-      const client = new Layr8Client();
+      const client = new Layr8Client(discardErrors);
       expect(client).toBeDefined();
     } finally {
       delete process.env.LAYR8_NODE_URL;
       delete process.env.LAYR8_API_KEY;
     }
+  });
+
+  // ---------- Poka-yoke behavior tests ----------
+
+  it("throws TypeError when ErrorHandler is missing", () => {
+    expect(() => new Layr8Client(undefined as any, { nodeUrl: "ws://localhost", apiKey: "key" }))
+      .toThrow(TypeError);
+  });
+
+  it("calls onError on parse failure", async () => {
+    await setupServer();
+    const errors: SDKError[] = [];
+    const client = new Layr8Client((e) => errors.push(e), { nodeUrl: wsUrl, apiKey: "test-key", agentDid: "did:web:test" });
+    client.handle("https://layr8.io/protocols/echo/1.0/request", async () => null);
+    await client.connect();
+
+    // Send garbage that can't be parsed as DIDComm
+    server.sendToClient(null, null, "plugin:lobby", "message", "not-a-didcomm-message");
+    await delay(200);
+
+    expect(errors.length).toBeGreaterThan(0);
+    expect(errors[0].kind).toBe(ErrorKind.ParseFailure);
+    await client.close();
+  });
+
+  it("calls onError when no handler matches", async () => {
+    await setupServer();
+    const errors: SDKError[] = [];
+    const client = new Layr8Client((e) => errors.push(e), { nodeUrl: wsUrl, apiKey: "test-key", agentDid: "did:web:test" });
+    client.handle("https://layr8.io/protocols/echo/1.0/request", async () => null);
+    await client.connect();
+
+    server.sendToClient(null, null, "plugin:lobby", "message", {
+      plaintext: {
+        id: "msg-1",
+        type: "https://unknown.org/protocol/1.0/unknown",
+        from: "did:web:other",
+        body: {},
+      },
+    });
+    await delay(200);
+
+    expect(errors.length).toBe(1);
+    expect(errors[0].kind).toBe(ErrorKind.NoHandler);
+    await client.close();
+  });
+
+  it("calls onError when handler throws", async () => {
+    await setupServer();
+    const errors: SDKError[] = [];
+    const client = new Layr8Client((e) => errors.push(e), { nodeUrl: wsUrl, apiKey: "test-key", agentDid: "did:web:alice" });
+    client.handle("https://layr8.io/protocols/echo/1.0/request", async () => { throw new Error("boom"); });
+    await client.connect();
+
+    server.sendToClient(null, null, "plugin:lobby", "message", {
+      plaintext: { id: "req-1", type: "https://layr8.io/protocols/echo/1.0/request", from: "did:web:bob", body: {} },
+    });
+    await delay(500);
+
+    expect(errors.some(e => e.kind === ErrorKind.HandlerException)).toBe(true);
+    await client.close();
+  });
+
+  it("send() with fireAndForget skips server ack", async () => {
+    await setupServer();
+    const client = new Layr8Client(discardErrors, { nodeUrl: wsUrl, apiKey: "test-key", agentDid: "did:web:alice" });
+    client.handle("https://layr8.io/protocols/echo/1.0/request", async () => null);
+    await client.connect();
+
+    // fireAndForget shouldn't need server ack
+    await client.send(
+      { type: "https://didcomm.org/basicmessage/2.0/message", to: ["did:web:bob"], body: { content: "hi" } },
+      { fireAndForget: true },
+    );
+
+    await client.close();
+  });
+
+  it("send() throws when server rejects", async () => {
+    await setupServer();
+    // Override to reject messages
+    server.onMsg = (msg) => {
+      if (msg.event === "phx_join") {
+        server.sendToClient(msg.ref, msg.ref, msg.topic, "phx_reply", { status: "ok", response: {} });
+        return;
+      }
+      if (msg.ref) {
+        server.sendToClient(null, msg.ref, msg.topic, "phx_reply", {
+          status: "error", response: { reason: "not_authorized" },
+        });
+      }
+    };
+
+    const errors: SDKError[] = [];
+    const client = new Layr8Client((e) => errors.push(e), { nodeUrl: wsUrl, apiKey: "test-key", agentDid: "did:web:alice" });
+    client.handle("https://layr8.io/protocols/echo/1.0/request", async () => null);
+    await client.connect();
+
+    // Server reject error is returned to the caller, not reported via onError
+    try {
+      await client.send({
+        type: "https://didcomm.org/basicmessage/2.0/message", to: ["did:web:bob"], body: {},
+      });
+      expect.fail("should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ServerRejectError);
+      expect((err as ServerRejectError).reason).toBe("not_authorized");
+    }
+
+    expect(errors.some(e => e.kind === ErrorKind.ServerReject)).toBe(false);
+    await client.close();
   });
 });

@@ -10,23 +10,30 @@ Full documentation: https://docs.layr8.io/reference/node-sdk
 ## Import
 
 ```typescript
-import { Layr8Client, unmarshalBody, ack } from "@layr8/sdk";
-import type { Message } from "@layr8/sdk";
+import { Layr8Client, unmarshalBody, ack, logErrors } from "@layr8/sdk";
+import type { Message, ErrorHandler } from "@layr8/sdk";
 ```
 
 The package is ESM-only (`"type": "module"`). Requires Node.js 20+.
 
 ## Config
 
+The constructor requires an `ErrorHandler` as its first argument, followed by an optional `Config` object:
+
 ```typescript
-const client = new Layr8Client({
+// Use the built-in logger
+const client = new Layr8Client(logErrors(), {
     nodeUrl: "ws://mynode.localhost/plugin_socket/websocket",
     apiKey: "my_api_key",
     agentDid: "did:web:mynode.localhost:my-agent",
 });
+
+// Or a custom error handler
+const onError: ErrorHandler = (err) => console.error(err.kind, err.cause?.message);
+const client = new Layr8Client(onError, { ... });
 ```
 
-All fields fall back to environment variables if empty/undefined:
+All config fields fall back to environment variables if empty/undefined:
 - `nodeUrl`  → `LAYR8_NODE_URL`
 - `apiKey`   → `LAYR8_API_KEY`
 - `agentDid` → `LAYR8_AGENT_DID`
@@ -36,7 +43,7 @@ All fields fall back to environment variables if empty/undefined:
 ## Lifecycle
 
 ```
-new Layr8Client → handle (register handlers) → connect → ... → close
+new Layr8Client(errorHandler) → handle (register handlers) → connect → ... → close
 ```
 
 - `handle` must be called BEFORE `connect` — throws `AlreadyConnectedError` after.
@@ -75,7 +82,9 @@ The protocol base URI is derived automatically from the message type
 
 ## Sending Messages
 
-### Fire-and-forget
+### Send (with server ack)
+
+By default, `send()` waits for the server to acknowledge receipt:
 
 ```typescript
 await client.send({
@@ -86,6 +95,21 @@ await client.send({
 ```
 
 `send()` accepts `Partial<Message>` — only `type`, `to`, and `body` are required.
+
+### Fire-and-forget
+
+To skip waiting for the server ack, pass `{ fireAndForget: true }`:
+
+```typescript
+await client.send(
+    {
+        type: "https://didcomm.org/basicmessage/2.0/message",
+        to: ["did:web:other-node:agent"],
+        body: { content: "Hello!" },
+    },
+    { fireAndForget: true },
+);
+```
 
 ### Request/Response
 
@@ -160,6 +184,32 @@ const resp = await client.request(msg, {
 
 ## Error Handling
 
+### ErrorHandler (Required)
+
+The constructor requires an `ErrorHandler` as its first argument. This ensures no SDK
+errors are silently dropped. The callback receives `SDKError` objects:
+
+```typescript
+import { logErrors, ErrorKind, SDKError } from "@layr8/sdk";
+import type { ErrorHandler } from "@layr8/sdk";
+
+// Built-in logger (writes to console.error)
+const client = new Layr8Client(logErrors(), { ... });
+
+// Custom handler
+const onError: ErrorHandler = (err: SDKError) => {
+    console.error(`[${ErrorKind[err.kind]}] ${err.cause?.message}`);
+};
+```
+
+### ErrorKind
+
+- `ParseFailure` — inbound message could not be parsed as DIDComm
+- `NoHandler` — no handler registered for the message type
+- `HandlerException` — a handler threw an exception
+- `ServerReject` — the server rejected a sent message
+- `TransportWrite` — failed to write to the WebSocket
+
 ### Problem Reports
 
 When a remote handler throws, `request` throws `ProblemReportError`:
@@ -195,7 +245,13 @@ try {
 }
 ```
 
-## Connection Events
+## Connection Resilience
+
+The SDK automatically reconnects when the WebSocket connection drops (node restart, network interruption). Reconnection uses exponential backoff (1s → 2s → 4s → ... → 30s max).
+
+During reconnection:
+- `send()`, `request()`, and other operations throw `NotConnectedError` immediately — no message queuing
+- `close()` stops the reconnect loop
 
 ```typescript
 client.on("disconnect", (err: Error) => {
@@ -206,7 +262,7 @@ client.on("reconnect", () => {
 });
 ```
 
-Note: `disconnect` fires only on unexpected drops, not on `close()`.
+`disconnect` fires only on unexpected drops, not on `close()`.
 
 ## DID and Protocol Conventions
 
@@ -237,7 +293,7 @@ Example: `https://layr8.io/protocols/echo/1.0/request` → protocol `https://lay
 ## Complete Example: Echo Agent
 
 ```typescript
-import { Layr8Client, unmarshalBody } from "@layr8/sdk";
+import { Layr8Client, unmarshalBody, logErrors } from "@layr8/sdk";
 import type { Message } from "@layr8/sdk";
 
 interface EchoRequest {
@@ -248,7 +304,7 @@ interface EchoResponse {
     echo: string;
 }
 
-const client = new Layr8Client({});
+const client = new Layr8Client(logErrors());
 
 client.handle(
     "https://layr8.io/protocols/echo/1.0/request",
@@ -278,7 +334,7 @@ process.on("SIGINT", async () => {
 ## Complete Example: Request/Response Client
 
 ```typescript
-import { Layr8Client, unmarshalBody, ProblemReportError } from "@layr8/sdk";
+import { Layr8Client, unmarshalBody, ProblemReportError, logErrors } from "@layr8/sdk";
 import type { Message } from "@layr8/sdk";
 
 interface EchoRequest {
@@ -289,7 +345,7 @@ interface EchoResponse {
     echo: string;
 }
 
-const client = new Layr8Client({});
+const client = new Layr8Client(logErrors());
 
 // Must register the protocol even if not handling inbound
 client.handle(

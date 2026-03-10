@@ -16,7 +16,7 @@
  *     npx tsx examples/echo-agent.ts
  */
 
-import { Layr8Client, unmarshalBody } from "../src/index.js";
+import { Layr8Client, unmarshalBody, logErrors } from "../src/index.js";
 import type { Message } from "../src/index.js";
 
 const ECHO_PROTOCOL_BASE = "https://layr8.io/protocols/echo/1.0";
@@ -111,7 +111,7 @@ async function runAgent(outerSignal: AbortSignal): Promise<void> {
   const onOuterAbort = () => abortController.abort();
   outerSignal.addEventListener("abort", onOuterAbort, { once: true });
 
-  const client = new Layr8Client({});
+  const client = new Layr8Client(logErrors());
 
   client.handle(
     ECHO_REQUEST,
