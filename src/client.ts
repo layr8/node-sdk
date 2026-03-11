@@ -129,6 +129,7 @@ export class Layr8Client extends EventEmitter {
         onDisconnect: (err) => this.emit("disconnect", err),
         onReconnect: () => this.emit("reconnect"),
       },
+      this.cfg.didSpec,
     );
 
     await channel.connect(protocols, signal);

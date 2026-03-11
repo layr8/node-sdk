@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { WebSocketServer, WebSocket as WS } from "ws";
 import { PhoenixChannel } from "../src/channel.js";
 import { NotConnectedError } from "../src/errors.js";
+import type { DidSpec } from "../src/config.js";
 
 /** Minimal Phoenix Channel V2 mock server. */
 class MockPhoenixServer {
@@ -71,6 +72,103 @@ function autoReplyJoin(server: MockPhoenixServer): void {
     }
   };
 }
+
+describe("PhoenixChannel didSpec", () => {
+  let server: MockPhoenixServer;
+
+  afterEach(async () => {
+    if (server) await server.close();
+  });
+
+  it("sends custom didSpec in join payload", async () => {
+    const port = randomPort();
+    const wsUrl = `ws://127.0.0.1:${port}/plugin_socket/websocket`;
+    server = new MockPhoenixServer(port);
+    await delay(50);
+
+    const customSpec: DidSpec = {
+      mode: "Require",
+      storage: "persistent",
+      label: "my-openclaw-agent",
+      type: "plugin",
+      verificationMethods: [
+        { purpose: "authentication" },
+        { purpose: "keyAgreement" },
+      ],
+    };
+
+    const joinPayloadReceived = new Promise<unknown>((resolve) => {
+      server.onMsg = (msg) => {
+        if (msg.event === "phx_join") {
+          resolve(msg.payload);
+          server.sendToClient(
+            msg.ref,
+            msg.ref,
+            msg.topic,
+            "phx_reply",
+            { status: "ok", response: { did: "did:web:node:test" } },
+          );
+        }
+      };
+    });
+
+    const ch = new PhoenixChannel(wsUrl, "test-api-key", "did:web:test", {
+      onMessage: () => {},
+    }, customSpec);
+
+    await ch.connect(["https://layr8.io/protocols/echo/1.0"]);
+
+    const payload = await joinPayloadReceived as {
+      did_spec: DidSpec;
+      payload_types: string[];
+    };
+
+    expect(payload.did_spec.mode).toBe("Require");
+    expect(payload.did_spec.storage).toBe("persistent");
+    expect(payload.did_spec.label).toBe("my-openclaw-agent");
+    expect(payload.did_spec.verificationMethods).toHaveLength(2);
+
+    ch.close();
+  });
+
+  it("uses default didSpec when none provided", async () => {
+    const port = randomPort();
+    const wsUrl = `ws://127.0.0.1:${port}/plugin_socket/websocket`;
+    server = new MockPhoenixServer(port);
+    await delay(50);
+
+    const joinPayloadReceived = new Promise<unknown>((resolve) => {
+      server.onMsg = (msg) => {
+        if (msg.event === "phx_join") {
+          resolve(msg.payload);
+          server.sendToClient(
+            msg.ref,
+            msg.ref,
+            msg.topic,
+            "phx_reply",
+            { status: "ok", response: { did: "did:web:node:test" } },
+          );
+        }
+      };
+    });
+
+    const ch = new PhoenixChannel(wsUrl, "test-api-key", "did:web:test", {
+      onMessage: () => {},
+    });
+
+    await ch.connect(["https://layr8.io/protocols/echo/1.0"]);
+
+    const payload = await joinPayloadReceived as {
+      did_spec: { mode: string; storage: string };
+    };
+
+    // Should still use the old defaults
+    expect(payload.did_spec.mode).toBe("Create");
+    expect(payload.did_spec.storage).toBe("ephemeral");
+
+    ch.close();
+  });
+});
 
 describe("PhoenixChannel reconnect", () => {
   let server: MockPhoenixServer;

@@ -1,5 +1,7 @@
 import WebSocket from "ws";
 import { Backoff } from "./backoff.js";
+import type { DidSpec } from "./config.js";
+import { DEFAULT_DID_SPEC } from "./config.js";
 import { ConnectionError, NotConnectedError } from "./errors.js";
 
 /**
@@ -90,14 +92,18 @@ export class PhoenixChannel {
     timer: ReturnType<typeof setTimeout>;
   }>();
 
+  private readonly didSpec: Required<DidSpec>;
+
   constructor(
     private readonly wsUrl: string,
     private readonly apiKey: string,
     agentDid: string,
     callbacks: ChannelCallbacks,
+    didSpec?: DidSpec,
   ) {
     this.topic = `plugins:${agentDid}`;
     this.callbacks = callbacks;
+    this.didSpec = { ...DEFAULT_DID_SPEC, ...didSpec, verificationMethods: didSpec?.verificationMethods ?? DEFAULT_DID_SPEC.verificationMethods };
   }
 
   async connect(protocols: string[], signal?: AbortSignal): Promise<void> {
@@ -164,18 +170,20 @@ export class PhoenixChannel {
     const ref = this.nextRef();
     this.joinRef = ref;
 
+    const spec = this.didSpec;
+    const didSpecPayload: Record<string, unknown> = {
+      mode: spec.mode,
+      storage: spec.storage,
+      type: spec.type,
+      verificationMethods: spec.verificationMethods,
+    };
+    if (spec.label) {
+      didSpecPayload.label = spec.label;
+    }
+
     const joinPayload = {
       payload_types: protocols,
-      did_spec: {
-        mode: "Create",
-        storage: "ephemeral",
-        type: "plugin",
-        verificationMethods: [
-          { purpose: "authentication" },
-          { purpose: "assertionMethod" },
-          { purpose: "keyAgreement" },
-        ],
-      },
+      did_spec: didSpecPayload,
     };
 
     return new Promise<void>((resolve, reject) => {
