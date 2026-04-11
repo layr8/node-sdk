@@ -22,11 +22,7 @@ export class HandlerRegistry {
     fn: HandlerFn,
     opts?: HandlerOptions,
   ): void {
-    if (this.handlers.has(msgType)) {
-      throw new Error(
-        `handler already registered for message type "${msgType}"`,
-      );
-    }
+    // Allow re-registration (overwrite) — needed for plugin hot-reload and multi-agent setups
     this.handlers.set(msgType, {
       fn,
       manualAck: opts?.manualAck ?? false,
