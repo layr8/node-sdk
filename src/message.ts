@@ -18,6 +18,13 @@ export interface SenderCredential {
  */
 export type Credential = SenderCredential;
 
+/** A DIDComm v2 attachment (e.g. Verifiable Grant). */
+export interface MessageAttachment {
+  id: string;
+  media_type: string;
+  data: Record<string, unknown>;
+}
+
 /** A DIDComm v2 message. */
 export interface Message {
   id: string;
@@ -28,6 +35,8 @@ export interface Message {
   parentThreadId: string;
   body: unknown;
   context?: MessageContext;
+  /** DIDComm v2 attachments (e.g. Verifiable Grants). */
+  attachments?: MessageAttachment[];
 }
 
 /**
@@ -84,6 +93,7 @@ interface DIDCommEnvelope {
   thid?: string;
   pthid?: string;
   body: unknown;
+  attachments?: MessageAttachment[];
 }
 
 /** Serialize a Message into DIDComm JSON wire format. */
@@ -97,6 +107,7 @@ export function marshalDIDComm(msg: InternalMessage): string {
   };
   if (msg.threadId) env.thid = msg.threadId;
   if (msg.parentThreadId) env.pthid = msg.parentThreadId;
+  if (msg.attachments && msg.attachments.length > 0) env.attachments = msg.attachments;
   return JSON.stringify(env);
 }
 

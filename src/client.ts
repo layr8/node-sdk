@@ -420,8 +420,10 @@ export class Layr8Client extends EventEmitter {
     }
 
     // Route to registered handler
+    console.log(`[sdk:inbound] type=${msg.type} from=${msg.from} id=${msg.id}`);
     const entry = this.registry.lookup(msg.type);
     if (!entry) {
+      console.log(`[sdk:inbound] NO HANDLER for type=${msg.type} (registered: ${[...this.registry["handlers"].keys()].join(", ")})`);
       this.onError(new SDKError(ErrorKind.NoHandler, {
         messageId: msg.id,
         type: msg.type,
@@ -513,7 +515,7 @@ export class Layr8Client extends EventEmitter {
   }
 
   private fillMessage(msg: Partial<Message>): InternalMessage {
-    return {
+    const internal: InternalMessage = {
       id: msg.id || generateId(),
       type: msg.type || "",
       from: msg.from || this.agentDid,
@@ -522,6 +524,10 @@ export class Layr8Client extends EventEmitter {
       parentThreadId: msg.parentThreadId || "",
       body: msg.body ?? null,
     };
+    if (msg.attachments && msg.attachments.length > 0) {
+      internal.attachments = msg.attachments;
+    }
+    return internal;
   }
 
   private async sendMessageAcked(msg: InternalMessage): Promise<void> {
