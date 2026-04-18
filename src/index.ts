@@ -3,6 +3,7 @@ export type { RequestOptions, SendOptions } from "./client.js";
 export type { Config, DidSpec, VerificationMethod } from "./config.js";
 export { DEFAULT_DID_SPEC } from "./config.js";
 export type {
+  Attachment,
   Message,
   MessageContext,
   SenderCredential,
