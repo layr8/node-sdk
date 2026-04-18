@@ -219,6 +219,9 @@ export class PhoenixChannel {
     if (spec.label) {
       didSpecPayload.label = spec.label;
     }
+    if (spec.controller) {
+      didSpecPayload.controller = spec.controller;
+    }
 
     const joinPayload = {
       payload_types: protocols,
