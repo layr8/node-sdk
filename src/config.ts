@@ -8,6 +8,8 @@ export interface Config {
   apiKey?: string;
   /** DID identity of this agent. If empty, an ephemeral DID is created on connect(). Fallback: LAYR8_AGENT_DID env. */
   agentDid?: string;
+  /** When true, the DID is persisted across restarts (stable keys for cross-node DIDComm). Default: false (ephemeral). */
+  persistent?: boolean;
 }
 
 /** Resolved configuration with required fields guaranteed present. */
@@ -15,6 +17,7 @@ export interface ResolvedConfig {
   nodeUrl: string;
   apiKey: string;
   agentDid: string;
+  persistent: boolean;
 }
 
 /** Fills empty fields from environment variables and validates required fields. */
@@ -44,5 +47,5 @@ export function resolveConfig(cfg: Config): ResolvedConfig {
     );
   }
 
-  return { nodeUrl: normalizedUrl, apiKey, agentDid };
+  return { nodeUrl: normalizedUrl, apiKey, agentDid, persistent: cfg.persistent ?? false };
 }

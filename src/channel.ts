@@ -90,14 +90,18 @@ export class PhoenixChannel {
     timer: ReturnType<typeof setTimeout>;
   }>();
 
+  private readonly persistent: boolean;
+
   constructor(
     private readonly wsUrl: string,
     private readonly apiKey: string,
     agentDid: string,
     callbacks: ChannelCallbacks,
+    persistent = false,
   ) {
     this.topic = `plugins:${agentDid}`;
     this.callbacks = callbacks;
+    this.persistent = persistent;
   }
 
   async connect(protocols: string[], signal?: AbortSignal): Promise<void> {
@@ -168,7 +172,7 @@ export class PhoenixChannel {
       payload_types: protocols,
       did_spec: {
         mode: "Create",
-        storage: "ephemeral",
+        storage: this.persistent ? "persistent" : "ephemeral",
         type: "plugin",
         verificationMethods: [
           { purpose: "authentication" },
