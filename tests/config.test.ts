@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { resolveConfig } from "../src/config.js";
+import { resolveConfig, DEFAULT_DID_SPEC } from "../src/config.js";
+import type { DidSpec } from "../src/config.js";
 
 describe("resolveConfig", () => {
   const originalEnv = { ...process.env };
@@ -68,5 +69,51 @@ describe("resolveConfig", () => {
       apiKey: "key",
     });
     expect(cfg.agentDid).toBe("");
+  });
+
+  it("uses default didSpec when none provided", () => {
+    const cfg = resolveConfig({
+      nodeUrl: "ws://localhost:4000",
+      apiKey: "key",
+    });
+    expect(cfg.didSpec).toEqual(DEFAULT_DID_SPEC);
+  });
+
+  it("passes through custom didSpec", () => {
+    const custom: DidSpec = {
+      mode: "Require",
+      storage: "persistent",
+      label: "my-agent",
+      type: "plugin",
+      verificationMethods: [
+        { purpose: "authentication" },
+      ],
+    };
+    const cfg = resolveConfig({
+      nodeUrl: "ws://localhost:4000",
+      apiKey: "key",
+      didSpec: custom,
+    });
+    expect(cfg.didSpec).toEqual(custom);
+  });
+
+  it("merges partial didSpec with defaults", () => {
+    const cfg = resolveConfig({
+      nodeUrl: "ws://localhost:4000",
+      apiKey: "key",
+      didSpec: {
+        mode: "Require",
+        storage: "persistent",
+        label: "my-agent",
+      },
+    });
+    expect(cfg.didSpec.mode).toBe("Require");
+    expect(cfg.didSpec.storage).toBe("persistent");
+    expect(cfg.didSpec.label).toBe("my-agent");
+    // Defaults filled in
+    expect(cfg.didSpec.type).toBe("plugin");
+    expect(cfg.didSpec.verificationMethods).toEqual(
+      DEFAULT_DID_SPEC.verificationMethods,
+    );
   });
 });
