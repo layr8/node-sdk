@@ -410,11 +410,19 @@ export class Layr8Client extends EventEmitter {
       return;
     }
 
-    // Check if this is a response to a pending Request (by thread ID)
-    if (msg.threadId) {
-      const pending = this.pending.get(msg.threadId);
+    // Check if this is a response to a pending Request (by thread ID).
+    // For most replies the responder reuses our thid → match by threadId.
+    // For DIDComm 2 problem-reports (and other corrective protocols) the
+    // responder typically sets pthid = our thid and starts a fresh thid
+    // for the report itself; match by parentThreadId in that case.
+    const matchKey =
+      (msg.threadId && this.pending.has(msg.threadId)) ? msg.threadId :
+      (msg.parentThreadId && this.pending.has(msg.parentThreadId)) ? msg.parentThreadId :
+      undefined;
+    if (matchKey) {
+      const pending = this.pending.get(matchKey);
       if (pending) {
-        this.pending.delete(msg.threadId);
+        this.pending.delete(matchKey);
         pending.resolve(msg);
         return;
       }
