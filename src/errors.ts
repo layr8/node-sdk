@@ -33,16 +33,31 @@ export class ClientClosedError extends Layr8Error {
 /**
  * Represents a DIDComm problem report received from a remote agent.
  * @see https://identity.foundation/didcomm-messaging/spec/#problem-reports
+ *
+ * Beyond the standard `code` + `comment`, holds the full report-problem
+ * `body` (typed as unknown — caller knows their protocol's report shape)
+ * and the raw `attachments` so a caller can inspect protocol-specific
+ * fields (e.g. PDP `decision_id`, `reason`, `required_scope`,
+ * `original_message`) without reaching into the underlying message.
  */
 export class ProblemReportError extends Layr8Error {
   readonly code: string;
   readonly comment: string;
+  readonly body: Record<string, unknown>;
+  readonly attachments: unknown[];
 
-  constructor(code: string, comment: string) {
+  constructor(
+    code: string,
+    comment: string,
+    body: Record<string, unknown> = {},
+    attachments: unknown[] = [],
+  ) {
     super(`problem report [${code}]: ${comment}`);
     this.name = "ProblemReportError";
     this.code = code;
     this.comment = comment;
+    this.body = body;
+    this.attachments = attachments;
   }
 }
 

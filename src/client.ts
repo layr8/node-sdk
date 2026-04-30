@@ -229,14 +229,14 @@ export class Layr8Client extends EventEmitter {
             resp.type ===
             "https://didcomm.org/report-problem/2.0/problem-report"
           ) {
-            const body = (resp.bodyRaw ?? resp.body) as {
-              code?: string;
-              comment?: string;
-            };
+            const body = ((resp.bodyRaw ?? resp.body) ?? {}) as Record<string, unknown>;
+            const attachments = ((resp as any).attachments ?? []) as unknown[];
             reject(
               new ProblemReportError(
-                body?.code ?? "unknown",
-                body?.comment ?? "unknown error",
+                (body?.code as string) ?? "unknown",
+                (body?.comment as string) ?? "unknown error",
+                body,
+                attachments,
               ),
             );
             return;
@@ -522,6 +522,7 @@ export class Layr8Client extends EventEmitter {
       threadId: msg.threadId || "",
       parentThreadId: msg.parentThreadId || "",
       body: msg.body ?? null,
+      ...(msg.attachments ? { attachments: msg.attachments } : {}),
     };
   }
 

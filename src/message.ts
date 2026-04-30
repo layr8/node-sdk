@@ -18,6 +18,24 @@ export interface SenderCredential {
  */
 export type Credential = SenderCredential;
 
+/** A DIDComm v2 attachment. */
+export interface Attachment {
+  id?: string;
+  description?: string;
+  filename?: string;
+  media_type?: string;
+  format?: string;
+  lastmod_time?: string;
+  byte_count?: number;
+  data: {
+    jws?: unknown;
+    hash?: string;
+    links?: string[];
+    base64?: string;
+    json?: unknown;
+  };
+}
+
 /** A DIDComm v2 message. */
 export interface Message {
   id: string;
@@ -27,6 +45,7 @@ export interface Message {
   threadId: string;
   parentThreadId: string;
   body: unknown;
+  attachments?: Attachment[];
   context?: MessageContext;
 }
 
@@ -84,6 +103,7 @@ interface DIDCommEnvelope {
   thid?: string;
   pthid?: string;
   body: unknown;
+  attachments?: Attachment[];
 }
 
 /** Serialize a Message into DIDComm JSON wire format. */
@@ -97,6 +117,7 @@ export function marshalDIDComm(msg: InternalMessage): string {
   };
   if (msg.threadId) env.thid = msg.threadId;
   if (msg.parentThreadId) env.pthid = msg.parentThreadId;
+  if (msg.attachments && msg.attachments.length > 0) env.attachments = msg.attachments;
   return JSON.stringify(env);
 }
 
@@ -117,6 +138,7 @@ interface InboundEnvelope {
     thid?: string;
     pthid?: string;
     body?: unknown;
+    attachments?: Attachment[];
   };
 }
 
@@ -134,6 +156,7 @@ export function parseDIDComm(data: unknown): InternalMessage {
     parentThreadId: pt.pthid || "",
     body: pt.body ?? null,
     bodyRaw: pt.body,
+    ...(pt.attachments ? { attachments: pt.attachments } : {}),
   };
 
   if (env.context) {
