@@ -62,6 +62,7 @@ export class Layr8Client extends EventEmitter {
   private readonly cfg;
   private readonly onError: ErrorHandler;
   private readonly registry = new HandlerRegistry();
+  private defaultHandler: HandlerFn | null = null;
   private channel: PhoenixChannel | null = null;
   private connected = false;
   private isClosed = false;
@@ -108,6 +109,25 @@ export class Layr8Client extends EventEmitter {
       throw new AlreadyConnectedError();
     }
     this.registry.register(msgType, fn, opts);
+  }
+
+  /**
+   * Register a fallback handler invoked for any inbound message whose type
+   * has no specific handler registered via handle(). Without this, unmatched
+   * types fire ErrorKind.NoHandler via onError.
+   *
+   * Note: the cloud-node only delivers messages whose protocol the client has
+   * subscribed to (derived from registered handle() types). The default
+   * handler catches types within a subscribed protocol that lack a specific
+   * handler — not arbitrary unsubscribed protocols.
+   *
+   * Must be called BEFORE connect(). Throws AlreadyConnectedError after.
+   */
+  handleDefault(fn: HandlerFn): void {
+    if (this.connected) {
+      throw new AlreadyConnectedError();
+    }
+    this.defaultHandler = fn;
   }
 
   /**
@@ -249,6 +269,7 @@ export class Layr8Client extends EventEmitter {
         },
       });
 
+      this.emit("outbound", internal);
       this.channel!.send("message", JSON.parse(marshalDIDComm(internal)))
         .then((reply) => {
           if (reply.status === "error") {
@@ -410,6 +431,10 @@ export class Layr8Client extends EventEmitter {
       return;
     }
 
+    // Observability hook before dispatch — observers see every parsed message
+    // regardless of how it gets routed.
+    this.emit("inbound", msg);
+
     // Check if this is a response to a pending Request (by thread ID).
     // For most replies the responder reuses our thid → match by threadId.
     // For DIDComm 2 problem-reports (and other corrective protocols) the
@@ -431,6 +456,15 @@ export class Layr8Client extends EventEmitter {
     // Route to registered handler
     const entry = this.registry.lookup(msg.type);
     if (!entry) {
+      if (this.defaultHandler) {
+        try {
+          this.channel!.sendAck([msg.id]);
+        } catch {
+          // Best-effort ack
+        }
+        this.runHandler(this.defaultHandler, msg);
+        return;
+      }
       this.onError(new SDKError(ErrorKind.NoHandler, {
         messageId: msg.id,
         type: msg.type,
@@ -537,6 +571,7 @@ export class Layr8Client extends EventEmitter {
   private async sendMessageAcked(msg: InternalMessage): Promise<void> {
     if (!this.channel) throw new NotConnectedError();
     const data = marshalDIDComm(msg);
+    this.emit("outbound", msg);
     const reply = await this.channel.send("message", JSON.parse(data));
     if (reply.status === "error") {
       throw new ServerRejectError(reply.reason || reply.status);
@@ -546,12 +581,14 @@ export class Layr8Client extends EventEmitter {
   private sendMessageFireAndForget(msg: InternalMessage): void {
     if (!this.channel) throw new NotConnectedError();
     const data = marshalDIDComm(msg);
+    this.emit("outbound", msg);
     this.channel.sendFireAndForget("message", JSON.parse(data));
   }
 
   private sendMessage(msg: InternalMessage): void {
     if (!this.channel) throw new NotConnectedError();
     const data = marshalDIDComm(msg);
+    this.emit("outbound", msg);
     this.channel.sendFireAndForget("message", JSON.parse(data));
   }
 }

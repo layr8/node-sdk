@@ -275,6 +275,35 @@ client.on("reconnect", () => {
 });
 ```
 
+## Observability Hooks
+
+For tools that need to surface raw DIDComm traffic (debugging, dashboards, MCP-style adapters that expose layr8 to other runtimes), the client emits events for every message it sends or receives. These fire alongside normal dispatch and don't change handler semantics.
+
+```typescript
+client.on("inbound", (msg: Message) => {
+  console.log("← recv", msg.type, "from", msg.from);
+});
+
+client.on("outbound", (msg: Message) => {
+  console.log("→ send", msg.type, "to", msg.to);
+});
+```
+
+`inbound` fires after a message is successfully parsed, before it's routed to a handler or matched to a pending `request()`. `outbound` fires for every `send()`, `request()`, and handler auto-response.
+
+### Default handler for unmatched types
+
+When the cloud-node delivers a message whose type has no specific handler, the default behaviour is to fire `ErrorKind.NoHandler` via your error handler. To route those messages somewhere instead, register a default handler:
+
+```typescript
+client.handleDefault(async (msg: Message) => {
+  console.log("unmatched:", msg.type);
+  return null;
+});
+```
+
+The cloud-node only delivers messages whose **protocol** the client has subscribed to (derived from `handle()` registrations). The default handler catches types within a subscribed protocol that lack a specific handler — it does not cause the client to subscribe to additional protocols.
+
 ## Message Context
 
 Inbound messages include a `context` field with metadata from the cloud-node:

@@ -757,4 +757,249 @@ describe("Layr8Client", () => {
     expect(errors.some(e => e.kind === ErrorKind.ServerReject)).toBe(false);
     await client.close();
   });
+
+  it("emits 'inbound' event for every received DIDComm message", async () => {
+    await setupServer();
+
+    const seen: Array<{ id: string; type: string; from?: string }> = [];
+
+    const client = new Layr8Client(discardErrors, {
+      nodeUrl: wsUrl,
+      apiKey: "test-key",
+      agentDid: "did:web:alice",
+    });
+    client.on("inbound", (msg: any) => {
+      seen.push({ id: msg.id, type: msg.type, from: msg.from });
+    });
+    client.handle("https://layr8.io/protocols/echo/1.0/request", async () => null);
+    await client.connect();
+
+    // Inject a message routed to the echo handler
+    server.sendToClient(null, null, "plugins:did:web:alice", "message", {
+      plaintext: {
+        id: "inb-1",
+        type: "https://layr8.io/protocols/echo/1.0/request",
+        from: "did:web:bob",
+        to: ["did:web:alice"],
+        body: {},
+      },
+    });
+
+    // Inject a thread-correlated reply
+    server.onMsg = (msg) => {
+      if (msg.event === "message") {
+        if (msg.ref) {
+          server.sendToClient(null, msg.ref, msg.topic, "phx_reply", {
+            status: "ok", response: {},
+          });
+        }
+        const outbound = msg.payload as { thid: string; from: string };
+        server.sendToClient(null, null, "plugins:did:web:alice", "message", {
+          plaintext: {
+            id: "inb-2",
+            type: "https://layr8.io/protocols/echo/1.0/response",
+            from: "did:web:bob",
+            to: [outbound.from],
+            thid: outbound.thid,
+            body: { echo: "ok" },
+          },
+        });
+      }
+    };
+
+    await client.request({
+      type: "https://layr8.io/protocols/echo/1.0/request",
+      to: ["did:web:bob"],
+      body: {},
+    });
+
+    await delay(100);
+
+    expect(seen.find((m) => m.id === "inb-1")).toBeDefined();
+    expect(seen.find((m) => m.id === "inb-2")).toBeDefined();
+
+    await client.close();
+  });
+
+  it("emits 'outbound' event for send() and request()", async () => {
+    await setupServer();
+
+    const outbound: Array<{ id: string; type: string; to: string[] }> = [];
+
+    server.onMsg = (msg) => {
+      if (msg.event === "phx_join") {
+        server.sendToClient(msg.ref, msg.ref, msg.topic, "phx_reply", {
+          status: "ok", response: {},
+        });
+        return;
+      }
+      if (msg.event === "message") {
+        if (msg.ref) {
+          server.sendToClient(null, msg.ref, msg.topic, "phx_reply", {
+            status: "ok", response: {},
+          });
+        }
+        const out = msg.payload as { thid?: string; from: string };
+        // Reply only to the request() call (has thid we can echo back)
+        if (out.thid) {
+          server.sendToClient(null, null, "plugins:did:web:alice", "message", {
+            plaintext: {
+              id: "resp-x",
+              type: "https://layr8.io/protocols/echo/1.0/response",
+              from: "did:web:bob",
+              to: [out.from],
+              thid: out.thid,
+              body: {},
+            },
+          });
+        }
+      }
+    };
+
+    const client = new Layr8Client(discardErrors, {
+      nodeUrl: wsUrl,
+      apiKey: "test-key",
+      agentDid: "did:web:alice",
+    });
+    client.on("outbound", (msg: any) => {
+      outbound.push({ id: msg.id, type: msg.type, to: msg.to });
+    });
+    client.handle("https://layr8.io/protocols/echo/1.0/request", async () => null);
+    await client.connect();
+
+    await client.send({
+      type: "https://didcomm.org/basicmessage/2.0/message",
+      to: ["did:web:bob"],
+      body: { content: "via send" },
+    });
+
+    await client.request({
+      type: "https://layr8.io/protocols/echo/1.0/request",
+      to: ["did:web:bob"],
+      body: {},
+    });
+
+    await delay(50);
+
+    expect(outbound.find((m) => m.type === "https://didcomm.org/basicmessage/2.0/message"))
+      .toBeDefined();
+    expect(outbound.find((m) => m.type === "https://layr8.io/protocols/echo/1.0/request"))
+      .toBeDefined();
+
+    await client.close();
+  });
+
+  it("emits 'outbound' for handler auto-responses", async () => {
+    await setupServer();
+
+    const outbound: string[] = [];
+
+    const client = new Layr8Client(discardErrors, {
+      nodeUrl: wsUrl,
+      apiKey: "test-key",
+      agentDid: "did:web:alice",
+    });
+    client.on("outbound", (msg: any) => {
+      outbound.push(msg.type);
+    });
+    client.handle(
+      "https://layr8.io/protocols/echo/1.0/request",
+      async () => ({
+        type: "https://layr8.io/protocols/echo/1.0/response",
+        body: { echo: "auto" },
+      }),
+    );
+    await client.connect();
+
+    server.sendToClient(null, null, "plugins:did:web:alice", "message", {
+      plaintext: {
+        id: "inb-auto",
+        type: "https://layr8.io/protocols/echo/1.0/request",
+        from: "did:web:bob",
+        to: ["did:web:alice"],
+        body: {},
+      },
+    });
+
+    await delay(100);
+
+    expect(outbound).toContain("https://layr8.io/protocols/echo/1.0/response");
+
+    await client.close();
+  });
+
+  it("handleDefault() catches messages with no specific handler", async () => {
+    await setupServer();
+
+    const caught: Array<{ type: string; id: string }> = [];
+    const errors: SDKError[] = [];
+
+    const client = new Layr8Client(
+      (err: SDKError) => errors.push(err),
+      {
+        nodeUrl: wsUrl,
+        apiKey: "test-key",
+        agentDid: "did:web:alice",
+      },
+    );
+    client.handle("https://layr8.io/protocols/echo/1.0/request", async () => null);
+    client.handleDefault(async (msg: any) => {
+      caught.push({ type: msg.type, id: msg.id });
+      return null;
+    });
+    await client.connect();
+
+    // Deliver an unregistered type — should hit handleDefault, not NoHandler error
+    server.sendToClient(null, null, "plugins:did:web:alice", "message", {
+      plaintext: {
+        id: "inb-unhandled",
+        type: "https://example.com/unregistered/1.0/notification",
+        from: "did:web:bob",
+        to: ["did:web:alice"],
+        body: { hello: "world" },
+      },
+    });
+
+    await delay(100);
+
+    expect(caught).toEqual([
+      { type: "https://example.com/unregistered/1.0/notification", id: "inb-unhandled" },
+    ]);
+    expect(errors.filter((e) => e.kind === ErrorKind.NoHandler)).toEqual([]);
+
+    await client.close();
+  });
+
+  it("falls through to NoHandler error when no default handler is set", async () => {
+    await setupServer();
+
+    const errors: SDKError[] = [];
+
+    const client = new Layr8Client(
+      (err: SDKError) => errors.push(err),
+      {
+        nodeUrl: wsUrl,
+        apiKey: "test-key",
+        agentDid: "did:web:alice",
+      },
+    );
+    client.handle("https://layr8.io/protocols/echo/1.0/request", async () => null);
+    await client.connect();
+
+    server.sendToClient(null, null, "plugins:did:web:alice", "message", {
+      plaintext: {
+        id: "inb-nodefault",
+        type: "https://example.com/unregistered/1.0/notification",
+        from: "did:web:bob",
+        to: ["did:web:alice"],
+        body: {},
+      },
+    });
+
+    await delay(100);
+
+    expect(errors.some((e) => e.kind === ErrorKind.NoHandler)).toBe(true);
+
+    await client.close();
+  });
 });
