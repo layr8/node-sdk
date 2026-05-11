@@ -85,12 +85,46 @@ export class PhoenixChannel {
   private reconnecting = false;
   private protocols: string[] = [];
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * Monotonic timestamp (Date.now()) of the most recently observed inbound
+   * frame — any message, pong, or phx_reply. Used by the Phoenix-level
+   * watchdog in startHeartbeat to detect "TCP healthy but Phoenix Channel
+   * GenServer hung" failures: when the heartbeat tick observes no frames
+   * for HEARTBEAT_MAX_SILENT_MS, it forces a close that the existing
+   * reconnect path picks up.
+   */
+  private lastFrameAt = Date.now();
+  /**
+   * Timer that periodically emits a WS-level `{:ping, _}` frame. Independent
+   * of the Phoenix heartbeat — covers the TCP / NAT / LB half-dead case
+   * where the connection is unilaterally killed without a FIN.
+   */
+  private wsPingTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * Timer armed each time we emit a WS ping. Cleared on any inbound frame
+   * (pong, message, phx_reply — anything proves liveness). If it fires we
+   * force-close the WS so the existing reconnect path takes over.
+   */
+  private pongWaitTimer: ReturnType<typeof setTimeout> | null = null;
   private assignedDIDVal = "";
   private readonly pendingRefs = new Map<string, {
     resolve: (reply: ServerReply) => void;
     reject: (err: Error) => void;
     timer: ReturnType<typeof setTimeout>;
   }>();
+
+  // Liveness detection constants. The Phoenix-level watchdog (HEARTBEAT_*)
+  // covers application-layer hangs; the WS-level ping/pong (WS_PING_* /
+  // PONG_WAIT_*) covers transport-layer hangs. Independent layers — both
+  // are needed because cowboy auto-pongs at the WS layer even when the
+  // Phoenix Channel GenServer has stopped processing.
+  //
+  // 75 000 ms = 2.5× heartbeat interval: tolerates one missed reply, trips
+  // on two consecutive misses.
+  private static readonly HEARTBEAT_INTERVAL_MS = 30_000;
+  private static readonly HEARTBEAT_MAX_SILENT_MS = 75_000;
+  private static readonly WS_PING_INTERVAL_MS = 25_000;
+  private static readonly WS_PONG_WAIT_MS = 35_000;
 
   private readonly didSpec: Required<DidSpec>;
 
@@ -149,8 +183,13 @@ export class PhoenixChannel {
       ws.on("open", async () => {
         signal?.removeEventListener("abort", onAbort);
         this.ws = ws;
+        // Reset the watchdog clock so the first heartbeat tick after
+        // (re)connect measures silence from "just now", not from before
+        // the disconnect.
+        this.lastFrameAt = Date.now();
         this.setupReadLoop();
         this.startHeartbeat();
+        this.startWsPingLoop();
 
         try {
           await this.join(this.protocols, signal);
@@ -296,13 +335,10 @@ export class PhoenixChannel {
     this.closed = true;
     this.reconnecting = false;
 
-    if (this.heartbeatTimer) {
-      clearInterval(this.heartbeatTimer);
-      this.heartbeatTimer = null;
-    }
+    this.stopLivenessTimers();
 
     // Reject all pending refs
-    for (const [ref, pending] of this.pendingRefs) {
+    for (const [, pending] of this.pendingRefs) {
       clearTimeout(pending.timer);
       pending.reject(new Error("channel closed"));
     }
@@ -330,6 +366,11 @@ export class PhoenixChannel {
     if (!this.ws) return;
 
     this.ws.on("message", (data) => {
+      // Any inbound frame proves the connection is alive end-to-end —
+      // disarm both watchdogs before dispatch. Heartbeat ack, message
+      // event, phx_reply, phx_error, all count.
+      this.lastFrameAt = Date.now();
+      this.disarmPongWait();
       try {
         const msg = unmarshalPhoenixMsg(data.toString());
         this.handleInbound(msg);
@@ -337,6 +378,15 @@ export class PhoenixChannel {
         // Phoenix wire format parse failure — not a DIDComm error.
         // Transport-level noise (e.g., truncated frames), matches Go SDK behavior.
       }
+    });
+
+    // WS-level pong arrival in response to our ping (or unsolicited).
+    // Either way, the transport is alive — clear pong_wait. We also
+    // bump lastFrameAt for the Phoenix-level watchdog, since a pong
+    // round-trip proves cowboy + TCP are healthy.
+    this.ws.on("pong", () => {
+      this.lastFrameAt = Date.now();
+      this.disarmPongWait();
     });
 
     this.ws.on("close", () => {
@@ -398,6 +448,21 @@ export class PhoenixChannel {
   private startHeartbeat(): void {
     this.heartbeatTimer = setInterval(() => {
       if (this.closed || !this.ws) return;
+
+      const silentMs = Date.now() - this.lastFrameAt;
+      if (silentMs > PhoenixChannel.HEARTBEAT_MAX_SILENT_MS) {
+        // Application-layer hang: cloud-node's Phoenix Channel GenServer
+        // is no longer responding (we'd have seen heartbeat acks or
+        // other frames by now). Terminate the socket and let the
+        // existing reconnect path take over.
+        try {
+          this.ws.terminate();
+        } catch {
+          // ignore
+        }
+        return;
+      }
+
       try {
         this.writeMsg({
           joinRef: null,
@@ -409,7 +474,63 @@ export class PhoenixChannel {
       } catch {
         // heartbeat write failed — connection likely dead
       }
-    }, 30_000);
+    }, PhoenixChannel.HEARTBEAT_INTERVAL_MS);
+  }
+
+  /**
+   * WS-level ping every WS_PING_INTERVAL_MS. Cowboy (Phoenix's HTTP/WS
+   * server) auto-pongs at the protocol layer — even if the application
+   * Channel is hung. When the underlying TCP / NAT / LB has silently
+   * dropped the connection, ping write may succeed locally but no pong
+   * comes back; pongWaitTimer fires and we force-close.
+   */
+  private startWsPingLoop(): void {
+    this.wsPingTimer = setInterval(() => {
+      if (this.closed || !this.ws) return;
+      try {
+        this.ws.ping();
+        this.armPongWait();
+      } catch {
+        // ping write failed — connection likely dead; let
+        // ws.on("error") path handle it
+      }
+    }, PhoenixChannel.WS_PING_INTERVAL_MS);
+  }
+
+  private armPongWait(): void {
+    if (this.pongWaitTimer) {
+      clearTimeout(this.pongWaitTimer);
+    }
+    this.pongWaitTimer = setTimeout(() => {
+      this.pongWaitTimer = null;
+      if (this.closed || !this.ws) return;
+      // No pong (or any frame) within WS_PONG_WAIT_MS of the last ping —
+      // transport is dead. Terminate; reconnect path takes over.
+      try {
+        this.ws.terminate();
+      } catch {
+        // ignore
+      }
+    }, PhoenixChannel.WS_PONG_WAIT_MS);
+  }
+
+  private disarmPongWait(): void {
+    if (this.pongWaitTimer) {
+      clearTimeout(this.pongWaitTimer);
+      this.pongWaitTimer = null;
+    }
+  }
+
+  private stopLivenessTimers(): void {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+    if (this.wsPingTimer) {
+      clearInterval(this.wsPingTimer);
+      this.wsPingTimer = null;
+    }
+    this.disarmPongWait();
   }
 
   private async reconnectLoop(): Promise<void> {
@@ -423,11 +544,9 @@ export class PhoenixChannel {
       this.ws = null;
     }
 
-    // Stop heartbeat
-    if (this.heartbeatTimer) {
-      clearInterval(this.heartbeatTimer);
-      this.heartbeatTimer = null;
-    }
+    // Stop all liveness timers — dial() will re-arm them after the new
+    // socket opens.
+    this.stopLivenessTimers();
 
     const bo = new Backoff(1000, 30000);
 
