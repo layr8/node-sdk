@@ -121,6 +121,10 @@ export class Layr8Client extends EventEmitter {
    * handler catches types within a subscribed protocol that lack a specific
    * handler — not arbitrary unsubscribed protocols.
    *
+   * The default handler runs with auto-ack only; manualAck is not supported.
+   * Use handle(type, fn, { manualAck: true }) for types that need durable
+   * processing.
+   *
    * Must be called BEFORE connect(). Throws AlreadyConnectedError after.
    */
   handleDefault(fn: HandlerFn): void {
@@ -128,6 +132,25 @@ export class Layr8Client extends EventEmitter {
       throw new AlreadyConnectedError();
     }
     this.defaultHandler = fn;
+  }
+
+  /**
+   * EventEmitter.emit() is synchronous and propagates listener exceptions.
+   * For SDK-internal events that fire on hot paths (inbound dispatch,
+   * outbound send), a throwing listener must NOT break the path — otherwise
+   * a pending request() can hang indefinitely. Route any throw to onError.
+   */
+  private safeEmit(event: string, msg: InternalMessage): void {
+    try {
+      this.emit(event, msg);
+    } catch (err) {
+      this.onError(new SDKError(ErrorKind.HandlerException, {
+        messageId: msg.id,
+        type: msg.type,
+        from: msg.from,
+        cause: err instanceof Error ? err : new Error(String(err)),
+      }));
+    }
   }
 
   /**
@@ -432,8 +455,9 @@ export class Layr8Client extends EventEmitter {
     }
 
     // Observability hook before dispatch — observers see every parsed message
-    // regardless of how it gets routed.
-    this.emit("inbound", msg);
+    // regardless of how it gets routed. A throwing listener must NOT break
+    // dispatch (e.g. cause a pending request() to hang).
+    this.safeEmit("inbound", msg);
 
     // Check if this is a response to a pending Request (by thread ID).
     // For most replies the responder reuses our thid → match by threadId.
@@ -571,7 +595,7 @@ export class Layr8Client extends EventEmitter {
   private async sendMessageAcked(msg: InternalMessage): Promise<void> {
     if (!this.channel) throw new NotConnectedError();
     const data = marshalDIDComm(msg);
-    this.emit("outbound", msg);
+    this.safeEmit("outbound", msg);
     const reply = await this.channel.send("message", JSON.parse(data));
     if (reply.status === "error") {
       throw new ServerRejectError(reply.reason || reply.status);
@@ -581,14 +605,14 @@ export class Layr8Client extends EventEmitter {
   private sendMessageFireAndForget(msg: InternalMessage): void {
     if (!this.channel) throw new NotConnectedError();
     const data = marshalDIDComm(msg);
-    this.emit("outbound", msg);
+    this.safeEmit("outbound", msg);
     this.channel.sendFireAndForget("message", JSON.parse(data));
   }
 
   private sendMessage(msg: InternalMessage): void {
     if (!this.channel) throw new NotConnectedError();
     const data = marshalDIDComm(msg);
-    this.emit("outbound", msg);
+    this.safeEmit("outbound", msg);
     this.channel.sendFireAndForget("message", JSON.parse(data));
   }
 }

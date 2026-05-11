@@ -970,6 +970,65 @@ describe("Layr8Client", () => {
     await client.close();
   });
 
+  it("a throwing 'inbound' listener does not break request() correlation", async () => {
+    await setupServer();
+
+    const errors: SDKError[] = [];
+
+    server.onMsg = (msg) => {
+      if (msg.event === "phx_join") {
+        server.sendToClient(msg.ref, msg.ref, msg.topic, "phx_reply", {
+          status: "ok", response: {},
+        });
+        return;
+      }
+      if (msg.event === "message") {
+        if (msg.ref) {
+          server.sendToClient(null, msg.ref, msg.topic, "phx_reply", {
+            status: "ok", response: {},
+          });
+        }
+        const out = msg.payload as { thid: string; from: string };
+        server.sendToClient(null, null, "plugins:did:web:alice", "message", {
+          plaintext: {
+            id: "resp-after-throw",
+            type: "https://layr8.io/protocols/echo/1.0/response",
+            from: "did:web:bob",
+            to: [out.from],
+            thid: out.thid,
+            body: { ok: true },
+          },
+        });
+      }
+    };
+
+    const client = new Layr8Client(
+      (err: SDKError) => errors.push(err),
+      {
+        nodeUrl: wsUrl,
+        apiKey: "test-key",
+        agentDid: "did:web:alice",
+      },
+    );
+    client.on("inbound", () => {
+      throw new Error("listener went boom");
+    });
+    client.handle("https://layr8.io/protocols/echo/1.0/request", async () => null);
+    await client.connect();
+
+    // request() must still resolve despite the throwing listener
+    const resp = await client.request({
+      type: "https://layr8.io/protocols/echo/1.0/request",
+      to: ["did:web:bob"],
+      body: {},
+    });
+
+    expect(resp.id).toBe("resp-after-throw");
+    expect(errors.some((e) => e.kind === ErrorKind.HandlerException)).toBe(true);
+
+    await client.close();
+  });
+
   it("falls through to NoHandler error when no default handler is set", async () => {
     await setupServer();
 

@@ -304,6 +304,8 @@ client.handleDefault(async (msg: Message) => {
 
 The cloud-node only delivers messages whose **protocol** the client has subscribed to (derived from `handle()` registrations). The default handler catches types within a subscribed protocol that lack a specific handler — it does not cause the client to subscribe to additional protocols.
 
+`handleDefault` runs with auto-ack only; `manualAck` is not supported on the fallback path. Use `handle(type, fn, { manualAck: true })` for types that need durable processing.
+
 ## Message Context
 
 Inbound messages include a `context` field with metadata from the cloud-node:
