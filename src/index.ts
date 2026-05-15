@@ -18,6 +18,7 @@ export {
   createMessage,
 } from "./message.js";
 export type { HandlerFn, HandlerOptions } from "./handler.js";
+export { PASS } from "./handler.js";
 export {
   Layr8Error,
   NotConnectedError,

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { WebSocketServer, WebSocket as WS } from "ws";
 import { IncomingMessage } from "node:http";
-import { Layr8Client, unmarshalBody, ProblemReportError, ServerRejectError, logErrors } from "../src/index.js";
+import { Layr8Client, unmarshalBody, ProblemReportError, ServerRejectError, logErrors, PASS } from "../src/index.js";
 import type { Message, ErrorHandler } from "../src/index.js";
 import { ErrorKind, SDKError } from "../src/index.js";
 
@@ -96,6 +96,44 @@ async function setupServer(): Promise<MockPhoenixServer> {
   };
 
   // Give server time to bind
+  await delay(50);
+  return server;
+}
+
+/**
+ * Setup a server that returns reply_protocol/1 capability.
+ * Collects all received events for assertions.
+ */
+async function setupReplyProtocolServer(): Promise<MockPhoenixServer> {
+  port = randomPort();
+  wsUrl = `ws://127.0.0.1:${port}/plugin_socket/websocket`;
+  server = new MockPhoenixServer(port);
+
+  server.onMsg = (msg) => {
+    if (msg.event === "phx_join") {
+      server.sendToClient(
+        msg.ref,
+        msg.ref,
+        msg.topic,
+        "phx_reply",
+        {
+          status: "ok",
+          response: {
+            did: "did:web:node:test",
+            capabilities: ["reply_protocol/1"],
+          },
+        },
+      );
+      return;
+    }
+    // Reply "ok" to all other messages (server ack)
+    if (msg.ref) {
+      server.sendToClient(null, msg.ref, msg.topic, "phx_reply", {
+        status: "ok", response: {},
+      });
+    }
+  };
+
   await delay(50);
   return server;
 }
@@ -1059,6 +1097,365 @@ describe("Layr8Client", () => {
 
     expect(errors.some((e) => e.kind === ErrorKind.NoHandler)).toBe(true);
 
+    await client.close();
+  });
+});
+
+describe("Layr8Client reply protocol", () => {
+  afterEach(async () => {
+    if (server) await server.close();
+  });
+
+  it("sends dispatch_reply with status handled when handler returns null", async () => {
+    await setupReplyProtocolServer();
+
+    const client = new Layr8Client(discardErrors, {
+      nodeUrl: wsUrl, apiKey: "test-key", agentDid: "did:web:alice",
+    });
+    client.handle(
+      "https://layr8.io/protocols/echo/1.0/request",
+      async () => null,
+    );
+    await client.connect();
+
+    server.clearReceived();
+    server.sendToClient(null, null, "plugin:lobby", "message", {
+      plaintext: {
+        id: "req-1",
+        type: "https://layr8.io/protocols/echo/1.0/request",
+        from: "did:web:bob",
+        to: ["did:web:alice"],
+        body: { message: "ping" },
+      },
+    });
+
+    await delay(300);
+    const received = server.getReceived();
+    const replies = received.filter((r) => r.event === "dispatch_reply");
+    expect(replies.length).toBe(1);
+    const payload = replies[0].payload as { message_id: string; status: string };
+    expect(payload.status).toBe("handled");
+    expect(payload.message_id).toBe("req-1");
+
+    await client.close();
+  });
+
+  it("sends dispatch_reply with status handled when handler returns a message", async () => {
+    await setupReplyProtocolServer();
+
+    const client = new Layr8Client(discardErrors, {
+      nodeUrl: wsUrl, apiKey: "test-key", agentDid: "did:web:alice",
+    });
+    client.handle(
+      "https://layr8.io/protocols/echo/1.0/request",
+      async (): Promise<Message> => ({
+        id: "", type: "https://layr8.io/protocols/echo/1.0/response",
+        from: "", to: [], threadId: "", parentThreadId: "",
+        body: { echo: "pong" },
+      }),
+    );
+    await client.connect();
+
+    server.clearReceived();
+    server.sendToClient(null, null, "plugin:lobby", "message", {
+      plaintext: {
+        id: "req-2",
+        type: "https://layr8.io/protocols/echo/1.0/request",
+        from: "did:web:bob",
+        to: ["did:web:alice"],
+        body: { message: "ping" },
+      },
+    });
+
+    await delay(300);
+    const received = server.getReceived();
+
+    // Should send both the response message and dispatch_reply
+    const replies = received.filter((r) => r.event === "dispatch_reply");
+    expect(replies.length).toBe(1);
+    expect((replies[0].payload as any).status).toBe("handled");
+
+    const responses = received.filter((r) => {
+      if (r.event !== "message") return false;
+      return (r.payload as any).type === "https://layr8.io/protocols/echo/1.0/response";
+    });
+    expect(responses.length).toBe(1);
+
+    await client.close();
+  });
+
+  it("sends dispatch_reply with status pass when no handler matches", async () => {
+    await setupReplyProtocolServer();
+
+    const client = new Layr8Client(discardErrors, {
+      nodeUrl: wsUrl, apiKey: "test-key", agentDid: "did:web:alice",
+    });
+    client.handle(
+      "https://layr8.io/protocols/echo/1.0/request",
+      async () => null,
+    );
+    await client.connect();
+
+    server.clearReceived();
+    server.sendToClient(null, null, "plugin:lobby", "message", {
+      plaintext: {
+        id: "unknown-1",
+        type: "https://unknown.org/protocol/1.0/unknown",
+        from: "did:web:bob",
+        body: {},
+      },
+    });
+
+    await delay(300);
+    const received = server.getReceived();
+    const replies = received.filter((r) => r.event === "dispatch_reply");
+    expect(replies.length).toBe(1);
+    expect((replies[0].payload as any).status).toBe("pass");
+    expect((replies[0].payload as any).message_id).toBe("unknown-1");
+
+    await client.close();
+  });
+
+  it("sends dispatch_reply with status pass when handler returns PASS", async () => {
+    await setupReplyProtocolServer();
+
+    const client = new Layr8Client(discardErrors, {
+      nodeUrl: wsUrl, apiKey: "test-key", agentDid: "did:web:alice",
+    });
+    client.handle(
+      "https://layr8.io/protocols/echo/1.0/request",
+      async () => PASS,
+    );
+    await client.connect();
+
+    server.clearReceived();
+    server.sendToClient(null, null, "plugin:lobby", "message", {
+      plaintext: {
+        id: "req-pass",
+        type: "https://layr8.io/protocols/echo/1.0/request",
+        from: "did:web:bob",
+        body: {},
+      },
+    });
+
+    await delay(300);
+    const received = server.getReceived();
+    const replies = received.filter((r) => r.event === "dispatch_reply");
+    expect(replies.length).toBe(1);
+    expect((replies[0].payload as any).status).toBe("pass");
+
+    await client.close();
+  });
+
+  it("sends dispatch_reply with status error when handler throws", async () => {
+    await setupReplyProtocolServer();
+
+    const client = new Layr8Client(discardErrors, {
+      nodeUrl: wsUrl, apiKey: "test-key", agentDid: "did:web:alice",
+    });
+    client.handle(
+      "https://layr8.io/protocols/echo/1.0/request",
+      async () => { throw new TypeError("bad input"); },
+    );
+    await client.connect();
+
+    server.clearReceived();
+    server.sendToClient(null, null, "plugin:lobby", "message", {
+      plaintext: {
+        id: "req-err",
+        type: "https://layr8.io/protocols/echo/1.0/request",
+        from: "did:web:bob",
+        body: {},
+      },
+    });
+
+    await delay(300);
+    const received = server.getReceived();
+    const replies = received.filter((r) => r.event === "dispatch_reply");
+    expect(replies.length).toBe(1);
+    const payload = replies[0].payload as { status: string; code: string; message: string };
+    expect(payload.status).toBe("error");
+    expect(payload.code).toBe("TypeError");
+    expect(payload.message).toBe("bad input");
+
+    await client.close();
+  });
+
+  it("does not send ack in new mode", async () => {
+    await setupReplyProtocolServer();
+
+    const client = new Layr8Client(discardErrors, {
+      nodeUrl: wsUrl, apiKey: "test-key", agentDid: "did:web:alice",
+    });
+    client.handle(
+      "https://layr8.io/protocols/echo/1.0/request",
+      async () => null,
+    );
+    await client.connect();
+
+    server.clearReceived();
+    server.sendToClient(null, null, "plugin:lobby", "message", {
+      plaintext: {
+        id: "req-noack",
+        type: "https://layr8.io/protocols/echo/1.0/request",
+        from: "did:web:bob",
+        body: {},
+      },
+    });
+
+    await delay(300);
+    const received = server.getReceived();
+    expect(received.some((r) => r.event === "ack")).toBe(false);
+
+    await client.close();
+  });
+
+  it("still sends ack in legacy mode (no capabilities)", async () => {
+    await setupServer();
+
+    const client = new Layr8Client(discardErrors, {
+      nodeUrl: wsUrl, apiKey: "test-key", agentDid: "did:web:alice",
+    });
+    client.handle(
+      "https://didcomm.org/basicmessage/2.0/message",
+      async () => null,
+    );
+    await client.connect();
+
+    server.clearReceived();
+    server.sendToClient(null, null, "plugin:lobby", "message", {
+      plaintext: {
+        id: "legacy-1",
+        type: "https://didcomm.org/basicmessage/2.0/message",
+        from: "did:web:bob",
+        body: { content: "hello" },
+      },
+    });
+
+    await delay(300);
+    const received = server.getReceived();
+    expect(received.some((r) => r.event === "ack")).toBe(true);
+    expect(received.some((r) => r.event === "dispatch_reply")).toBe(false);
+
+    await client.close();
+  });
+});
+
+describe("Layr8Client handleAll", () => {
+  afterEach(async () => {
+    if (server) await server.close();
+  });
+
+  it("handleAll registers catch-all and dispatches unmatched messages", async () => {
+    await setupReplyProtocolServer();
+
+    const client = new Layr8Client(discardErrors, {
+      nodeUrl: wsUrl, apiKey: "test-key", agentDid: "did:web:alice",
+    });
+
+    const received: string[] = [];
+    client.handleAll(async (msg) => {
+      received.push(msg.type);
+      return null;
+    });
+    await client.connect();
+
+    server.sendToClient(null, null, "plugin:lobby", "message", {
+      plaintext: {
+        id: "any-1",
+        type: "https://any.org/protocol/1.0/anything",
+        from: "did:web:bob",
+        body: {},
+      },
+    });
+
+    await delay(300);
+    expect(received).toContain("https://any.org/protocol/1.0/anything");
+
+    await client.close();
+  });
+
+  it("specific handler takes priority over handleAll", async () => {
+    await setupReplyProtocolServer();
+
+    const client = new Layr8Client(discardErrors, {
+      nodeUrl: wsUrl, apiKey: "test-key", agentDid: "did:web:alice",
+    });
+
+    const specificCalled: string[] = [];
+    const catchAllCalled: string[] = [];
+
+    client.handle(
+      "https://layr8.io/protocols/echo/1.0/request",
+      async (msg) => { specificCalled.push(msg.type); return null; },
+    );
+    client.handleAll(async (msg) => {
+      catchAllCalled.push(msg.type);
+      return null;
+    });
+    await client.connect();
+
+    // Send a message that matches the specific handler
+    server.sendToClient(null, null, "plugin:lobby", "message", {
+      plaintext: {
+        id: "specific-1",
+        type: "https://layr8.io/protocols/echo/1.0/request",
+        from: "did:web:bob",
+        body: {},
+      },
+    });
+    // Send a message that falls through to catch-all
+    server.sendToClient(null, null, "plugin:lobby", "message", {
+      plaintext: {
+        id: "catchall-1",
+        type: "https://other.org/protocol/1.0/msg",
+        from: "did:web:bob",
+        body: {},
+      },
+    });
+
+    await delay(300);
+    expect(specificCalled).toEqual(["https://layr8.io/protocols/echo/1.0/request"]);
+    expect(catchAllCalled).toEqual(["https://other.org/protocol/1.0/msg"]);
+
+    await client.close();
+  });
+
+  it("handleAll returning PASS sends dispatch_reply pass", async () => {
+    await setupReplyProtocolServer();
+
+    const client = new Layr8Client(discardErrors, {
+      nodeUrl: wsUrl, apiKey: "test-key", agentDid: "did:web:alice",
+    });
+    client.handleAll(async () => PASS);
+    await client.connect();
+
+    server.clearReceived();
+    server.sendToClient(null, null, "plugin:lobby", "message", {
+      plaintext: {
+        id: "pass-1",
+        type: "https://any.org/protocol/1.0/anything",
+        from: "did:web:bob",
+        body: {},
+      },
+    });
+
+    await delay(300);
+    const received = server.getReceived();
+    const replies = received.filter((r) => r.event === "dispatch_reply");
+    expect(replies.length).toBe(1);
+    expect((replies[0].payload as any).status).toBe("pass");
+
+    await client.close();
+  });
+
+  it("rejects handleAll() after connect()", async () => {
+    await setupServer();
+    const client = new Layr8Client(discardErrors, {
+      nodeUrl: wsUrl, apiKey: "test-key", agentDid: "did:web:test",
+    });
+    await client.connect();
+    expect(() => client.handleAll(async () => null)).toThrow(/already connected/i);
     await client.close();
   });
 });

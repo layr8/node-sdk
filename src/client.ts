@@ -27,7 +27,7 @@ import {
 } from "./errors.js";
 import type { ErrorHandler } from "./errors.js";
 import type { HandlerFn, HandlerOptions } from "./handler.js";
-import { HandlerRegistry } from "./handler.js";
+import { HandlerRegistry, PASS } from "./handler.js";
 import type { InternalMessage, Message } from "./message.js";
 import {
   generateId,
@@ -62,7 +62,6 @@ export class Layr8Client extends EventEmitter {
   private readonly cfg;
   private readonly onError: ErrorHandler;
   private readonly registry = new HandlerRegistry();
-  private defaultHandler: HandlerFn | null = null;
   private channel: PhoenixChannel | null = null;
   private connected = false;
   private isClosed = false;
@@ -112,26 +111,17 @@ export class Layr8Client extends EventEmitter {
   }
 
   /**
-   * Register a fallback handler invoked for any inbound message whose type
-   * has no specific handler registered via handle(). Without this, unmatched
-   * types fire ErrorKind.NoHandler via onError.
-   *
-   * Note: the cloud-node only delivers messages whose protocol the client has
-   * subscribed to (derived from registered handle() types). The default
-   * handler catches types within a subscribed protocol that lack a specific
-   * handler — not arbitrary unsubscribed protocols.
-   *
-   * The default handler runs with auto-ack only; manualAck is not supported.
-   * Use handle(type, fn, { manualAck: true }) for types that need durable
-   * processing.
-   *
+   * Register a catch-all handler for any message type not matched by a specific handler.
    * Must be called BEFORE connect(). Throws AlreadyConnectedError after.
    */
-  handleDefault(fn: HandlerFn): void {
+  handleAll(
+    fn: HandlerFn,
+    opts?: HandlerOptions,
+  ): void {
     if (this.connected) {
       throw new AlreadyConnectedError();
     }
-    this.defaultHandler = fn;
+    this.registry.registerCatchAll(fn, opts);
   }
 
   /**
@@ -477,17 +467,13 @@ export class Layr8Client extends EventEmitter {
       }
     }
 
+    const useReplyProtocol = this.channel!.replyProtocol();
+
     // Route to registered handler
     const entry = this.registry.lookup(msg.type);
     if (!entry) {
-      if (this.defaultHandler) {
-        try {
-          this.channel!.sendAck([msg.id]);
-        } catch {
-          // Best-effort ack
-        }
-        this.runHandler(this.defaultHandler, msg);
-        return;
+      if (useReplyProtocol) {
+        this.sendDispatchReply(msg.id, "pass");
       }
       this.onError(new SDKError(ErrorKind.NoHandler, {
         messageId: msg.id,
@@ -497,22 +483,24 @@ export class Layr8Client extends EventEmitter {
       return;
     }
 
-    // Auto-ack before handler (unless manual ack)
-    if (!entry.manualAck) {
-      try {
-        this.channel!.sendAck([msg.id]);
-      } catch {
-        // Best-effort: swallow write failures on auto-ack to avoid
-        // unhandled exceptions in the inbound message callback path.
-      }
+    if (useReplyProtocol) {
+      // New mode: no ack, use dispatch_reply after handler
+      this.runHandlerWithReply(entry.fn, msg);
     } else {
-      msg.ackFn = (id: string) => {
-        this.channel!.sendAck([id]);
-      };
+      // Legacy mode: ack before handler
+      if (!entry.manualAck) {
+        try {
+          this.channel!.sendAck([msg.id]);
+        } catch {
+          // Best-effort ack
+        }
+      } else {
+        msg.ackFn = (id: string) => {
+          this.channel!.sendAck([id]);
+        };
+      }
+      this.runHandler(entry.fn, msg);
     }
-
-    // Run handler asynchronously
-    this.runHandler(entry.fn, msg);
   }
 
   private async runHandler(
@@ -554,6 +542,71 @@ export class Layr8Client extends EventEmitter {
           cause: err instanceof Error ? err : new Error(String(err)),
         }));
       }
+    }
+  }
+
+  private async runHandlerWithReply(
+    fn: HandlerFn,
+    msg: InternalMessage,
+  ): Promise<void> {
+    let resp: Partial<Message> | null | undefined | typeof PASS;
+
+    try {
+      resp = await fn(msg);
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.onError(new SDKError(ErrorKind.HandlerException, {
+        messageId: msg.id,
+        type: msg.type,
+        from: msg.from,
+        cause: error,
+      }));
+      this.sendDispatchReply(msg.id, "error", error.name, error.message);
+      return;
+    }
+
+    if (resp === PASS) {
+      this.sendDispatchReply(msg.id, "pass");
+      return;
+    }
+
+    // Send the response message if one was returned
+    if (resp && resp !== null) {
+      try {
+        const internal = this.fillMessage(resp as Partial<Message>);
+        if (!internal.to.length && msg.from) {
+          internal.to = [msg.from];
+        }
+        if (!internal.threadId) {
+          internal.threadId = msg.threadId || msg.id;
+        }
+        this.sendMessage(internal);
+      } catch (err) {
+        this.onError(new SDKError(ErrorKind.TransportWrite, {
+          messageId: msg.id,
+          type: msg.type,
+          from: msg.from,
+          cause: err instanceof Error ? err : new Error(String(err)),
+        }));
+      }
+    }
+
+    this.sendDispatchReply(msg.id, "handled");
+  }
+
+  private sendDispatchReply(
+    messageId: string,
+    status: string,
+    code?: string,
+    message?: string,
+  ): void {
+    try {
+      const payload: Record<string, string> = { message_id: messageId, status };
+      if (code) payload.code = code;
+      if (message) payload.message = message;
+      this.channel!.sendFireAndForget("dispatch_reply", payload);
+    } catch {
+      // Best-effort
     }
   }
 

@@ -126,6 +126,7 @@ export class PhoenixChannel {
   private static readonly WS_PING_INTERVAL_MS = 25_000;
   private static readonly WS_PONG_WAIT_MS = 35_000;
 
+  private replyProtocolEnabled = false;
   private readonly didSpec: Required<DidSpec>;
 
   constructor(
@@ -226,6 +227,7 @@ export class PhoenixChannel {
     const joinPayload = {
       payload_types: protocols,
       did_spec: didSpecPayload,
+      reply_protocol: true,
     };
 
     return new Promise<void>((resolve, reject) => {
@@ -244,7 +246,7 @@ export class PhoenixChannel {
         signal?.removeEventListener("abort", onAbort);
         const reply = payload as {
           status: string;
-          response?: { did?: string; reason?: string };
+          response?: { did?: string; reason?: string; capabilities?: string[] };
         };
         if (reply.status !== "ok") {
           const reason = reply.response?.reason ?? `join rejected: ${reply.status}`;
@@ -254,6 +256,8 @@ export class PhoenixChannel {
         if (reply.response?.did) {
           this.assignedDIDVal = reply.response.did;
         }
+        const caps = reply.response?.capabilities ?? [];
+        this.replyProtocolEnabled = caps.includes("reply_protocol/1");
         resolve();
       };
 
@@ -331,6 +335,11 @@ export class PhoenixChannel {
 
   assignedDID(): string {
     return this.assignedDIDVal;
+  }
+
+  /** Whether the server supports the reply protocol (capability negotiated at join). */
+  replyProtocol(): boolean {
+    return this.replyProtocolEnabled;
   }
 
   close(): void {
