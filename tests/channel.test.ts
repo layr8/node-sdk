@@ -170,6 +170,97 @@ describe("PhoenixChannel didSpec", () => {
   });
 });
 
+describe("PhoenixChannel capability negotiation", () => {
+  let server: MockPhoenixServer;
+
+  afterEach(async () => {
+    if (server) await server.close();
+  });
+
+  it("sends reply_protocol: true in join params", async () => {
+    const port = randomPort();
+    const wsUrl = `ws://127.0.0.1:${port}/plugin_socket/websocket`;
+    server = new MockPhoenixServer(port);
+    await delay(50);
+
+    const joinPayloadReceived = new Promise<unknown>((resolve) => {
+      server.onMsg = (msg) => {
+        if (msg.event === "phx_join") {
+          resolve(msg.payload);
+          server.sendToClient(
+            msg.ref, msg.ref, msg.topic, "phx_reply",
+            { status: "ok", response: { did: "did:web:node:test" } },
+          );
+        }
+      };
+    });
+
+    const ch = new PhoenixChannel(wsUrl, "test-api-key", "did:web:test", {
+      onMessage: () => {},
+    });
+    await ch.connect(["https://layr8.io/protocols/echo/1.0"]);
+
+    const payload = await joinPayloadReceived as { reply_protocol: boolean };
+    expect(payload.reply_protocol).toBe(true);
+
+    ch.close();
+  });
+
+  it("reports new mode when server returns reply_protocol/1 capability", async () => {
+    const port = randomPort();
+    const wsUrl = `ws://127.0.0.1:${port}/plugin_socket/websocket`;
+    server = new MockPhoenixServer(port);
+    await delay(50);
+
+    server.onMsg = (msg) => {
+      if (msg.event === "phx_join") {
+        server.sendToClient(
+          msg.ref, msg.ref, msg.topic, "phx_reply",
+          {
+            status: "ok",
+            response: {
+              did: "did:web:node:test",
+              capabilities: ["reply_protocol/1"],
+            },
+          },
+        );
+      }
+    };
+
+    const ch = new PhoenixChannel(wsUrl, "test-api-key", "did:web:test", {
+      onMessage: () => {},
+    });
+    await ch.connect(["https://layr8.io/protocols/echo/1.0"]);
+
+    expect(ch.replyProtocol()).toBe(true);
+    ch.close();
+  });
+
+  it("reports legacy mode when server omits capabilities", async () => {
+    const port = randomPort();
+    const wsUrl = `ws://127.0.0.1:${port}/plugin_socket/websocket`;
+    server = new MockPhoenixServer(port);
+    await delay(50);
+
+    server.onMsg = (msg) => {
+      if (msg.event === "phx_join") {
+        server.sendToClient(
+          msg.ref, msg.ref, msg.topic, "phx_reply",
+          { status: "ok", response: { did: "did:web:node:test" } },
+        );
+      }
+    };
+
+    const ch = new PhoenixChannel(wsUrl, "test-api-key", "did:web:test", {
+      onMessage: () => {},
+    });
+    await ch.connect(["https://layr8.io/protocols/echo/1.0"]);
+
+    expect(ch.replyProtocol()).toBe(false);
+    ch.close();
+  });
+});
+
 describe("PhoenixChannel reconnect", () => {
   let server: MockPhoenixServer;
 
