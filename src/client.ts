@@ -37,6 +37,10 @@ import {
 import { PhoenixChannel } from "./channel.js";
 import { RestClient, restUrlFromWebSocket } from "./rest.js";
 
+function toError(err: unknown): Error {
+  return err instanceof Error ? err : new Error(String(err));
+}
+
 /** Options for request(). */
 export interface RequestOptions {
   /** Set pthid for nested thread correlation. */
@@ -432,13 +436,33 @@ export class Layr8Client extends EventEmitter {
     );
   }
 
+  private sendReplyMessage(resp: Partial<Message>, original: InternalMessage): void {
+    try {
+      const internal = this.fillMessage(resp);
+      if (!internal.to.length && original.from) {
+        internal.to = [original.from];
+      }
+      if (!internal.threadId) {
+        internal.threadId = original.threadId || original.id;
+      }
+      this.sendMessage(internal);
+    } catch (err) {
+      this.onError(new SDKError(ErrorKind.TransportWrite, {
+        messageId: original.id,
+        type: original.type,
+        from: original.from,
+        cause: toError(err),
+      }));
+    }
+  }
+
   private handleInboundMessage(payload: unknown): void {
     let msg: InternalMessage;
     try {
       msg = parseDIDComm(payload);
     } catch (err) {
       this.onError(new SDKError(ErrorKind.ParseFailure, {
-        cause: err instanceof Error ? err : new Error(String(err)),
+        cause: toError(err),
         raw: payload,
       }));
       return;
@@ -508,40 +532,22 @@ export class Layr8Client extends EventEmitter {
     msg: InternalMessage,
   ): Promise<void> {
     let resp: Partial<Message> | null | undefined;
-
-    // 1. Run the handler — failures are HandlerException
     try {
       resp = await fn(msg);
     } catch (err) {
+      const error = toError(err);
       this.onError(new SDKError(ErrorKind.HandlerException, {
         messageId: msg.id,
         type: msg.type,
         from: msg.from,
-        cause: err instanceof Error ? err : new Error(String(err)),
+        cause: error,
       }));
-      this.sendProblemReport(msg, err instanceof Error ? err : new Error(String(err)));
+      this.sendProblemReport(msg, error);
       return;
     }
 
-    // 2. Send the response — failures are TransportWrite
     if (resp) {
-      try {
-        const internal = this.fillMessage(resp);
-        if (!internal.to.length && msg.from) {
-          internal.to = [msg.from];
-        }
-        if (!internal.threadId) {
-          internal.threadId = msg.threadId || msg.id;
-        }
-        this.sendMessage(internal);
-      } catch (err) {
-        this.onError(new SDKError(ErrorKind.TransportWrite, {
-          messageId: msg.id,
-          type: msg.type,
-          from: msg.from,
-          cause: err instanceof Error ? err : new Error(String(err)),
-        }));
-      }
+      this.sendReplyMessage(resp, msg);
     }
   }
 
@@ -550,11 +556,10 @@ export class Layr8Client extends EventEmitter {
     msg: InternalMessage,
   ): Promise<void> {
     let resp: Partial<Message> | null | undefined | typeof PASS;
-
     try {
       resp = await fn(msg);
     } catch (err) {
-      const error = err instanceof Error ? err : new Error(String(err));
+      const error = toError(err);
       this.onError(new SDKError(ErrorKind.HandlerException, {
         messageId: msg.id,
         type: msg.type,
@@ -570,25 +575,8 @@ export class Layr8Client extends EventEmitter {
       return;
     }
 
-    // Send the response message if one was returned
-    if (resp && resp !== null) {
-      try {
-        const internal = this.fillMessage(resp as Partial<Message>);
-        if (!internal.to.length && msg.from) {
-          internal.to = [msg.from];
-        }
-        if (!internal.threadId) {
-          internal.threadId = msg.threadId || msg.id;
-        }
-        this.sendMessage(internal);
-      } catch (err) {
-        this.onError(new SDKError(ErrorKind.TransportWrite, {
-          messageId: msg.id,
-          type: msg.type,
-          from: msg.from,
-          cause: err instanceof Error ? err : new Error(String(err)),
-        }));
-      }
+    if (resp) {
+      this.sendReplyMessage(resp as Partial<Message>, msg);
     }
 
     this.sendDispatchReply(msg.id, "handled");

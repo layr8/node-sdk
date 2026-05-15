@@ -966,7 +966,7 @@ describe("Layr8Client", () => {
     await client.close();
   });
 
-  it("handleDefault() catches messages with no specific handler", async () => {
+  it("handleAll() catches messages with no specific handler", async () => {
     await setupServer();
 
     const caught: Array<{ type: string; id: string }> = [];
@@ -981,13 +981,13 @@ describe("Layr8Client", () => {
       },
     );
     client.handle("https://layr8.io/protocols/echo/1.0/request", async () => null);
-    client.handleDefault(async (msg: any) => {
+    client.handleAll(async (msg: any) => {
       caught.push({ type: msg.type, id: msg.id });
       return null;
     });
     await client.connect();
 
-    // Deliver an unregistered type — should hit handleDefault, not NoHandler error
+    // Deliver an unregistered type — should hit handleAll, not NoHandler error
     server.sendToClient(null, null, "plugins:did:web:alice", "message", {
       plaintext: {
         id: "inb-unhandled",
