@@ -1459,3 +1459,97 @@ describe("Layr8Client handleAll", () => {
     await client.close();
   });
 });
+
+describe("Layr8Client protocol registration", () => {
+  afterEach(async () => {
+    if (server) await server.close();
+  });
+
+  it("always includes report-problem protocol in payload_types", async () => {
+    let joinPayload: any = null;
+    port = randomPort();
+    wsUrl = `ws://127.0.0.1:${port}/plugin_socket/websocket`;
+    server = new MockPhoenixServer(port);
+
+    server.onMsg = (msg) => {
+      if (msg.event === "phx_join") {
+        joinPayload = msg.payload;
+        server.sendToClient(
+          msg.ref, msg.ref, msg.topic, "phx_reply",
+          { status: "ok", response: { did: "did:web:node:test" } },
+        );
+      }
+    };
+    await delay(50);
+
+    const client = new Layr8Client(discardErrors, {
+      nodeUrl: wsUrl, apiKey: "test-key", agentDid: "did:web:test",
+    });
+    client.handle("https://layr8.test/echo/1.0/request", async () => null);
+    await client.connect();
+
+    expect(joinPayload.payload_types).toContain("https://didcomm.org/report-problem/2.0");
+    expect(joinPayload.payload_types).toContain("https://layr8.test/echo/1.0");
+    await client.close();
+  });
+
+  it("does not duplicate report-problem if already registered", async () => {
+    let joinPayload: any = null;
+    port = randomPort();
+    wsUrl = `ws://127.0.0.1:${port}/plugin_socket/websocket`;
+    server = new MockPhoenixServer(port);
+
+    server.onMsg = (msg) => {
+      if (msg.event === "phx_join") {
+        joinPayload = msg.payload;
+        server.sendToClient(
+          msg.ref, msg.ref, msg.topic, "phx_reply",
+          { status: "ok", response: { did: "did:web:node:test" } },
+        );
+      }
+    };
+    await delay(50);
+
+    const client = new Layr8Client(discardErrors, {
+      nodeUrl: wsUrl, apiKey: "test-key", agentDid: "did:web:test",
+    });
+    // Register a handler for problem-report explicitly
+    client.handle("https://didcomm.org/report-problem/2.0/problem-report", async () => null);
+    await client.connect();
+
+    const count = joinPayload.payload_types.filter(
+      (p: string) => p === "https://didcomm.org/report-problem/2.0"
+    ).length;
+    expect(count).toBe(1);
+    await client.close();
+  });
+
+  it("skips report-problem when catch-all (*) is registered", async () => {
+    let joinPayload: any = null;
+    port = randomPort();
+    wsUrl = `ws://127.0.0.1:${port}/plugin_socket/websocket`;
+    server = new MockPhoenixServer(port);
+
+    server.onMsg = (msg) => {
+      if (msg.event === "phx_join") {
+        joinPayload = msg.payload;
+        server.sendToClient(
+          msg.ref, msg.ref, msg.topic, "phx_reply",
+          { status: "ok", response: { did: "did:web:node:test" } },
+        );
+      }
+    };
+    await delay(50);
+
+    const client = new Layr8Client(discardErrors, {
+      nodeUrl: wsUrl, apiKey: "test-key", agentDid: "did:web:test",
+    });
+    client.handleAll(async () => null);
+    await client.connect();
+
+    // With *, no need for explicit report-problem
+    expect(joinPayload.payload_types).toContain("*");
+    expect(joinPayload.payload_types).not.toContain("https://didcomm.org/report-problem/2.0");
+    await client.close();
+  });
+});
