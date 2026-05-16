@@ -545,7 +545,7 @@ export class Layr8Client extends EventEmitter {
     fn: HandlerFn,
     msg: InternalMessage,
   ): Promise<void> {
-    let resp: Partial<Message> | null | undefined;
+    let resp: Partial<Message> | null | undefined | typeof PASS;
     try {
       resp = await fn(msg);
     } catch (err) {
@@ -560,8 +560,8 @@ export class Layr8Client extends EventEmitter {
       return;
     }
 
-    if (resp) {
-      this.sendReplyMessage(resp, msg);
+    if (resp && resp !== PASS) {
+      this.sendReplyMessage(resp as Partial<Message>, msg);
     }
   }
 
