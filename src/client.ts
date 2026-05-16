@@ -157,6 +157,13 @@ export class Layr8Client extends EventEmitter {
 
     const protocols = this.registry.protocols();
 
+    // Always subscribe to the problem-report protocol so nodes can deliver
+    // problem reports back to us (e.g., when B is disconnected or passes).
+    const PROBLEM_REPORT_PROTOCOL = "https://didcomm.org/report-problem/2.0";
+    if (!protocols.includes("*") && !protocols.includes(PROBLEM_REPORT_PROTOCOL)) {
+      protocols.push(PROBLEM_REPORT_PROTOCOL);
+    }
+
     const channel = new PhoenixChannel(
       this.cfg.nodeUrl,
       this.cfg.apiKey,
