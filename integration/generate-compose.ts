@@ -113,6 +113,7 @@ function nodeEnv(name: string): Record<string, string> {
     L8_PDP_ENABLED: "false",
     L8_DEFAULT_ALLOW_RULES: '["*"]',
     L8_NODE_GRPC_CLIENT_SSL: "false",
+    L8_DIDCOMM_TRANSPORTS: "http",
   };
 }
 

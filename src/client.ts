@@ -493,6 +493,13 @@ export class Layr8Client extends EventEmitter {
       const pending = this.pending.get(matchKey);
       if (pending) {
         this.pending.delete(matchKey);
+        // Send dispatch_reply so the node's PluginRouter doesn't time out
+        // Send dispatch_reply so the node's PluginRouter doesn't time out.
+        // Only when the node advertises reply_protocol — legacy nodes don't
+        // recognize the event and may drop the connection.
+        if (this.channel!.replyProtocol()) {
+          this.sendDispatchReply(msg.id, "handled");
+        }
         pending.resolve(msg);
         return;
       }
@@ -582,11 +589,16 @@ export class Layr8Client extends EventEmitter {
       return;
     }
 
+    // Send dispatch_reply BEFORE the response message. The node's channel
+    // processes WebSocket events sequentially; if the response targets a
+    // remote node, the channel blocks during HTTP delivery. Sending
+    // dispatch_reply first ensures the PluginRouter's receive unblocks
+    // before that blocking send.
+    this.sendDispatchReply(msg.id, "handled");
+
     if (resp) {
       this.sendReplyMessage(resp as Partial<Message>, msg);
     }
-
-    this.sendDispatchReply(msg.id, "handled");
   }
 
   private sendDispatchReply(
