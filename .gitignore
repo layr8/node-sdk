@@ -1,3 +1,7 @@
 node_modules/
 dist/
 *.tsbuildinfo
+
+# Integration test generated files
+integration/docker-compose.yml
+integration/.probe-results.json

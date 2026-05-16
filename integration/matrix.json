@@ -1,0 +1,4 @@
+{
+  "image": "ghcr.io/layr-8/cloud-node",
+  "versions": ["4.15.0", "4.14.0", "4.13.40", "4.12.0"]
+}
