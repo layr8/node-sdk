@@ -15,6 +15,7 @@ const outputPath = resolve(__dirname, ".probe-results.json");
 interface Matrix {
   image: string;
   versions: string[];
+  basePort?: number;
 }
 
 function serviceName(version: string): string {
@@ -32,16 +33,18 @@ function compareVersions(a: string, b: string): number {
   return 0;
 }
 
-async function probeNode(name: string, version: string): Promise<NodeInfo> {
-  const url = `ws://${name}.localhost/plugin_socket/websocket`;
+async function probeNode(name: string, version: string, hostPort: number): Promise<NodeInfo> {
+  const url = `ws://${name}.localhost:${hostPort}/plugin_socket/websocket`;
 
+  const probeId = `probe-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const client = new Layr8Client(logErrors(), {
     nodeUrl: url,
     apiKey: "probe-test-key",
+    agentDid: `did:web:${name}%3A9000:probe:${probeId}`,
   });
 
-  // Register a dummy handler so the node accepts us
-  client.handle("https://probe.test/ping", () => null);
+  // Register a dummy handler so the node accepts us (need proper protocol URI format)
+  client.handle("https://layr8.io/protocols/probe/1.0/ping", () => null);
 
   const signal = AbortSignal.timeout(30_000);
   try {
@@ -93,10 +96,12 @@ export async function setup(): Promise<void> {
 
   console.log(`Probing ${matrix.versions.length} nodes...`);
 
+  const basePort = matrix.basePort ?? 4100;
+
   // Probe all nodes in parallel
-  const probes = matrix.versions.map((version) => {
+  const probes = matrix.versions.map((version, i) => {
     const name = serviceName(version);
-    return probeNode(name, version);
+    return probeNode(name, version, basePort + i);
   });
 
   const settled = await Promise.allSettled(probes);

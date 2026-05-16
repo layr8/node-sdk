@@ -5,3 +5,4 @@ dist/
 # Integration test generated files
 integration/docker-compose.yml
 integration/.probe-results.json
+integration/init-db.sql
