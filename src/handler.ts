@@ -1,7 +1,10 @@
 import type { Message } from "./message.js";
 
-/** Handler function signature. Return a response Message, or null for fire-and-forget. */
-export type HandlerFn = (msg: Message) => Promise<Message | null>;
+/** Sentinel value returned by handlers to signal "I don't handle this message". */
+export const PASS: unique symbol = Symbol("PASS");
+
+/** Handler function signature. Return a response Message, null, or PASS. */
+export type HandlerFn = (msg: Message) => Promise<Message | null | typeof PASS>;
 
 /** Options for handler registration. */
 export interface HandlerOptions {
@@ -13,9 +16,10 @@ export interface HandlerEntry {
   manualAck: boolean;
 }
 
-/** Thread-safe handler registry mapping message types to handlers. */
+/** Handler registry mapping message types to handlers, with optional catch-all. */
 export class HandlerRegistry {
   private readonly handlers = new Map<string, HandlerEntry>();
+  private catchAll: HandlerEntry | undefined;
 
   register(
     msgType: string,
@@ -33,18 +37,35 @@ export class HandlerRegistry {
     });
   }
 
+  registerCatchAll(fn: HandlerFn, opts?: HandlerOptions): void {
+    if (this.catchAll) {
+      throw new Error("catch-all handler already registered");
+    }
+    this.catchAll = {
+      fn,
+      manualAck: opts?.manualAck ?? false,
+    };
+  }
+
+  hasCatchAll(): boolean {
+    return this.catchAll !== undefined;
+  }
+
   lookup(msgType: string): HandlerEntry | undefined {
-    return this.handlers.get(msgType);
+    return this.handlers.get(msgType) ?? this.catchAll;
   }
 
   /**
    * Returns the unique protocol base URIs derived from registered handler message types.
-   * e.g. "https://layr8.io/protocols/echo/1.0/request" → "https://layr8.io/protocols/echo/1.0"
+   * Appends "*" if a catch-all handler is registered.
    */
   protocols(): string[] {
     const seen = new Set<string>();
     for (const msgType of this.handlers.keys()) {
       seen.add(deriveProtocol(msgType));
+    }
+    if (this.catchAll) {
+      seen.add("*");
     }
     return [...seen];
   }

@@ -24,6 +24,8 @@ export interface DidSpec {
   type?: string;
   /** Cryptographic verification methods to create. */
   verificationMethods?: VerificationMethod[];
+  /** Optional controller DID for the created DID document. Defaults to the node DID. */
+  controller?: string;
 }
 
 /** Default DID specification matching the original hardcoded behavior. */
@@ -32,6 +34,7 @@ export const DEFAULT_DID_SPEC: Required<DidSpec> = {
   storage: "ephemeral",
   label: "",
   type: "plugin",
+  controller: "",
   verificationMethods: [
     { purpose: "authentication" },
     { purpose: "assertionMethod" },

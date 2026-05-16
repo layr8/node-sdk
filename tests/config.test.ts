@@ -85,6 +85,7 @@ describe("resolveConfig", () => {
       storage: "persistent",
       label: "my-agent",
       type: "plugin",
+      controller: "",
       verificationMethods: [
         { purpose: "authentication" },
       ],
