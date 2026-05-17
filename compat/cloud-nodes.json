@@ -1,0 +1,7 @@
+{
+  "image": "ghcr.io/layr-8/cloud-node",
+  "min": "4.13.0",
+  "exclude": {
+    "4.14.0": "Accepts reply_protocol from join but doesn't advertise capability"
+  }
+}
