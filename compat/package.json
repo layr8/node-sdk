@@ -1,0 +1,7 @@
+{
+  "name": "@layr8/compat",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Layr8 Node SDK compat-suite scenarios"
+}

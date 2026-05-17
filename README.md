@@ -548,6 +548,41 @@ Persist-then-ack pattern: writes inbound messages to a JSON-lines file before ac
 LAYR8_API_KEY=your-key npx tsx examples/durable-handler.ts
 ```
 
+## Compat Testing
+
+The `compat/` directory implements cross-language compatibility testing for the [compat-suite](https://github.com/layr8/compat-suite) orchestrator.
+
+### Structure
+
+```
+compat/
+├── scenarios/       # Core scenario logic (echo, pass, wildcard, disconnected)
+├── tests/           # Layer 1: vitest tests with mock Phoenix server
+├── bin/             # Layer 2: CLI adapter for compat-suite orchestrator
+├── Dockerfile       # Builds ghcr.io/layr8/node-sdk/compat:{version}
+└── cloud-nodes.json # Supported cloud-node version declaration
+```
+
+### Running Locally
+
+```bash
+npm run compat:test
+```
+
+### Adding a Scenario
+
+1. Create `compat/scenarios/{name}.ts` exporting `runReceiver(ctx, onReady?)` and `runSender(ctx)`
+2. Create `compat/tests/{name}.test.ts` using the `MockPhoenixServer`
+3. The CLI auto-discovers scenarios from the `scenarios/` directory
+
+### CI Flow
+
+1. Build + unit tests
+2. Layer 1 compat tests (mock server, no Docker)
+3. Publish SDK to npm
+4. Build + push compat image to ghcr.io
+5. Trigger compat-suite gate (cross-language matrix)
+
 ## Development
 
 ### Prerequisites

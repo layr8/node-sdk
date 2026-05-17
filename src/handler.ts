@@ -3,8 +3,14 @@ import type { Message } from "./message.js";
 /** Sentinel value returned by handlers to signal "I don't handle this message". */
 export const PASS: unique symbol = Symbol("PASS");
 
-/** Handler function signature. Return a response Message, null, or PASS. */
-export type HandlerFn = (msg: Message) => Promise<Message | null | typeof PASS>;
+/**
+ * A partial message returned from a handler. Only `type` is required;
+ * the client fills in routing fields (id, from, to, threadId) automatically.
+ */
+export type ResponseMessage = Pick<Message, "type"> & Partial<Message>;
+
+/** Handler function signature. Return a ResponseMessage, null, or PASS. */
+export type HandlerFn = (msg: Message) => ResponseMessage | null | typeof PASS | Promise<ResponseMessage | null | typeof PASS>;
 
 /** Options for handler registration. */
 export interface HandlerOptions {
