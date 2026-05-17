@@ -77,8 +77,8 @@ describe("MockPhoenixServer", () => {
 
     ws1.send(JSON.stringify([null, "2", "plugins:did:web:test:sender", "message", envelope]));
 
-    const payload = await received as { context: unknown; plaintext: string };
-    expect(payload.plaintext).toBe(envelope);
+    const payload = await received as { context: unknown; plaintext: unknown };
+    expect(payload.plaintext).toEqual(JSON.parse(envelope));
     expect(payload.context).toBeDefined();
 
     ws1.close();

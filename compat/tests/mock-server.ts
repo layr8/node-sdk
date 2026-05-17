@@ -105,7 +105,7 @@ export class MockPhoenixServer {
                 authorized: true,
                 sender_credentials: [],
               },
-              plaintext: envelope,
+              plaintext: JSON.parse(envelope),
             },
           ]));
         }
