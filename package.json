@@ -20,8 +20,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "tsc --noEmit",
-    "test:integration": "tsx tests/integration-test.ts",
-    "compat:test": "vitest run --config compat/vitest.config.ts",
+"compat:test": "vitest run --config compat/vitest.config.ts",
     "compat:build": "tsc -p compat/tsconfig.build.json"
   },
   "engines": {
