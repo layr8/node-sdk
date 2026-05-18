@@ -1,4 +1,5 @@
 import { readdirSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -58,12 +59,17 @@ async function main(): Promise<void> {
       console.error("--did is required in sender mode");
       process.exit(2);
     }
+    // Generate a sender DID from the node URL — the cloud-node
+    // rejects empty DIDs, so we must provide one even for senders.
+    const nodeHost = new URL(values.node!).hostname;
+    const senderDid = `did:web:${nodeHost}%3A9000:compat:sender-${randomUUID()}`;
     const ctx: SenderContext = {
       nodeUrl: values.node!,
       apiKey: values["api-key"]!,
       testId: values["test-id"]!,
       timeout,
       receiverDid: values.did!,
+      agentDid: senderDid,
     };
     const result: ScenarioResult = await mod.runSender(ctx);
     console.log(JSON.stringify({
