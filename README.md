@@ -124,6 +124,8 @@ client.handle(
 
 The SDK automatically derives protocol base URIs from your handler message types and registers them with the cloud-node on connect. For example, handling `https://layr8.io/protocols/echo/1.0/request` registers the protocol `https://layr8.io/protocols/echo/1.0`.
 
+The SDK also auto-adds the DIDComm problem report protocol (`https://didcomm.org/report-problem/2.0`), ensuring at least one protocol is always present. The cloud-node requires at least one protocol on join.
+
 ## Sending Messages
 
 ### Send
