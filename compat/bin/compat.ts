@@ -25,7 +25,7 @@ async function main(): Promise<void> {
       node: { type: "string" },
       did: { type: "string" },
       "api-key": { type: "string", default: process.env.LAYR8_API_KEY ?? "test-key" },
-      timeout: { type: "string", default: "30000" },
+      timeout: { type: "string", default: "10000" },
       "test-id": { type: "string", default: "cli" },
     },
   });
