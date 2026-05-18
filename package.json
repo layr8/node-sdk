@@ -1,6 +1,6 @@
 {
   "name": "@layr8/sdk",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Layr8 DIDComm Agent SDK for Node.js",
   "type": "module",
   "main": "./dist/index.js",
@@ -36,6 +36,10 @@
     "@types/uuid": "^10.0.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/layr8/node-sdk"
   },
   "license": "MIT"
 }
