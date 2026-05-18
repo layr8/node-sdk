@@ -1,8 +1,9 @@
 FROM node:20-alpine
 WORKDIR /app
 
+COPY package.json ./
 ARG SDK_VERSION
-RUN npm init -y && npm install @layr8/sdk@${SDK_VERSION}
+RUN npm install @layr8/sdk@${SDK_VERSION}
 
 COPY dist/scenarios/ ./scenarios/
 COPY dist/bin/ ./bin/
