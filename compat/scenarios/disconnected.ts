@@ -1,6 +1,6 @@
 import { Layr8Client, logErrors } from "@layr8/sdk";
 import type { ScenarioContext, SenderContext, ScenarioResult } from "./types.js";
-import { elapsedMs } from "./types.js";
+import { elapsedMs, clientConfig } from "./types.js";
 
 const ECHO_TYPE = "https://layr8.test/echo/1.0/request";
 const ECHO_RESPONSE_TYPE = "https://layr8.test/echo/1.0/response";
@@ -11,11 +11,7 @@ const ECHO_RESPONSE_TYPE = "https://layr8.test/echo/1.0/response";
  * receiver lifecycle separately (receiver mode connects then exits).
  */
 export async function registerAndDisconnect(ctx: ScenarioContext): Promise<void> {
-  const client = new Layr8Client(logErrors(), {
-    nodeUrl: ctx.nodeUrl,
-    apiKey: ctx.apiKey,
-    agentDid: ctx.agentDid,
-  });
+  const client = new Layr8Client(logErrors(), clientConfig(ctx));
   client.handle(ECHO_TYPE, (msg) => ({
     type: ECHO_RESPONSE_TYPE,
     body: { echo: msg.body },
@@ -32,11 +28,7 @@ export async function runReceiver(
   ctx: ScenarioContext,
   onReady?: (did: string) => void,
 ): Promise<void> {
-  const client = new Layr8Client(logErrors(), {
-    nodeUrl: ctx.nodeUrl,
-    apiKey: ctx.apiKey,
-    agentDid: ctx.agentDid,
-  });
+  const client = new Layr8Client(logErrors(), clientConfig(ctx));
   client.handle(ECHO_TYPE, (msg) => ({
     type: ECHO_RESPONSE_TYPE,
     body: { echo: msg.body },
@@ -48,11 +40,7 @@ export async function runReceiver(
 }
 
 export async function runSender(ctx: SenderContext): Promise<ScenarioResult> {
-  const client = new Layr8Client(logErrors(), {
-    nodeUrl: ctx.nodeUrl,
-    apiKey: ctx.apiKey,
-    agentDid: ctx.agentDid,
-  });
+  const client = new Layr8Client(logErrors(), clientConfig(ctx));
   client.handle(ECHO_TYPE, (msg) => ({
     type: ECHO_RESPONSE_TYPE,
     body: { echo: msg.body },
