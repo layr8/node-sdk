@@ -1,6 +1,6 @@
 {
   "name": "@layr8/sdk",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Layr8 DIDComm Agent SDK for Node.js",
   "type": "module",
   "main": "./dist/index.js",

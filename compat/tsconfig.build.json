@@ -3,15 +3,11 @@
     "target": "ES2022",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-    "strict": true,
-    "esModuleInterop": true,
     "skipLibCheck": true,
+    "noCheck": true,
     "outDir": "./dist",
-    "declaration": false,
-    "baseUrl": ".",
-    "paths": {
-      "@layr8/sdk": ["../src/index.ts"]
-    }
+    "rootDir": ".",
+    "declaration": false
   },
   "include": ["scenarios/**/*.ts", "bin/**/*.ts"],
   "exclude": ["node_modules", "dist", "tests"]
