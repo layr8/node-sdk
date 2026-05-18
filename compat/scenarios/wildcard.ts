@@ -1,6 +1,6 @@
 import { Layr8Client, logErrors } from "@layr8/sdk";
 import type { ScenarioContext, SenderContext, ScenarioResult } from "./types.js";
-import { elapsedMs } from "./types.js";
+import { elapsedMs, clientConfig } from "./types.js";
 
 const ARBITRARY_TYPE = "https://layr8.test/arbitrary/1.0/invoke";
 const ARBITRARY_RESPONSE_TYPE = "https://layr8.test/arbitrary/1.0/result";
@@ -9,11 +9,7 @@ export async function runReceiver(
   ctx: ScenarioContext,
   onReady?: (did: string) => void,
 ): Promise<void> {
-  const client = new Layr8Client(logErrors(), {
-    nodeUrl: ctx.nodeUrl,
-    apiKey: ctx.apiKey,
-    agentDid: ctx.agentDid,
-  });
+  const client = new Layr8Client(logErrors(), clientConfig(ctx));
 
   // Catch-all handler — responds to any message type
   client.handleAll((msg) => ({
@@ -27,11 +23,7 @@ export async function runReceiver(
 }
 
 export async function runSender(ctx: SenderContext): Promise<ScenarioResult> {
-  const client = new Layr8Client(logErrors(), {
-    nodeUrl: ctx.nodeUrl,
-    apiKey: ctx.apiKey,
-    agentDid: ctx.agentDid,
-  });
+  const client = new Layr8Client(logErrors(), clientConfig(ctx));
 
   client.handle(ARBITRARY_TYPE, () => null);
 

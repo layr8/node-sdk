@@ -25,3 +25,13 @@ export interface ScenarioResult {
 export function elapsedMs(start: number): number {
   return Date.now() - start;
 }
+
+/** Build SDK config from context, omitting agentDid when not set. */
+export function clientConfig(ctx: ScenarioContext): { nodeUrl: string; apiKey: string; agentDid?: string } {
+  const cfg: { nodeUrl: string; apiKey: string; agentDid?: string } = {
+    nodeUrl: ctx.nodeUrl,
+    apiKey: ctx.apiKey,
+  };
+  if (ctx.agentDid) cfg.agentDid = ctx.agentDid;
+  return cfg;
+}
