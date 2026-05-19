@@ -2,8 +2,7 @@ import { Layr8Client, logErrors, PASS } from "@layr8/sdk";
 import type { ScenarioContext, SenderContext, ScenarioResult } from "./types.js";
 import { elapsedMs, clientConfig } from "./types.js";
 
-const ECHO_TYPE = "https://layr8.test/echo/1.0/request";
-const ECHO_RESPONSE_TYPE = "https://layr8.test/echo/1.0/response";
+const PING_TYPE = "https://didcomm.org/trust-ping/2.0/ping";
 
 export async function runReceiver(
   ctx: ScenarioContext,
@@ -11,8 +10,9 @@ export async function runReceiver(
 ): Promise<void> {
   const client = new Layr8Client(logErrors(), clientConfig(ctx));
 
-  // Handler returns PASS — intentionally declines the message
-  client.handle(ECHO_TYPE, () => PASS);
+  // Handler returns PASS — intentionally declines the message so the
+  // cloud-node's built-in trust-ping handler can send a ping-response.
+  client.handle(PING_TYPE, () => PASS);
 
   await client.connect(AbortSignal.timeout(ctx.timeout));
   if (onReady) onReady(client.did);
@@ -22,23 +22,21 @@ export async function runReceiver(
 export async function runSender(ctx: SenderContext): Promise<ScenarioResult> {
   const client = new Layr8Client(logErrors(), clientConfig(ctx));
 
-  client.handle(ECHO_TYPE, (msg) => ({
-    type: ECHO_RESPONSE_TYPE,
-    body: { echo: msg.body },
-  }));
+  // Register handler so the cloud-node knows we speak this protocol
+  client.handle(PING_TYPE, () => null);
 
   const start = Date.now();
   try {
     await client.connect(AbortSignal.timeout(ctx.timeout));
     await client.request(
-      { type: ECHO_TYPE, to: [ctx.receiverDid], body: { test: ctx.testId } },
+      { type: PING_TYPE, to: [ctx.receiverDid], body: { responseRequested: true } },
       { signal: AbortSignal.timeout(ctx.timeout) },
     );
-    // If request succeeds, that's unexpected — PASS should cause an error
-    return { status: "fail", scenario: "pass", duration_ms: elapsedMs(start), error: "expected error but got success" };
-  } catch {
-    // Any error (ProblemReportError or timeout) means PASS worked correctly
+    // Success means the cloud-node handled the trust-ping after PASS
     return { status: "pass", scenario: "pass", duration_ms: elapsedMs(start) };
+  } catch (err) {
+    // Timeout or error means something went wrong
+    return { status: "fail", scenario: "pass", duration_ms: elapsedMs(start), error: String(err) };
   } finally {
     await client.close();
   }
