@@ -1,9 +1,17 @@
 import { WebSocketServer, WebSocket } from "ws";
 
+const PING_TYPE = "https://didcomm.org/trust-ping/2.0/ping";
+const PING_RESPONSE_TYPE = "https://didcomm.org/trust-ping/2.0/ping-response";
+
 interface ConnectedClient {
   ws: WebSocket;
   did: string;
   topic: string;
+}
+
+interface PendingDispatch {
+  senderDid: string;
+  plaintext: Record<string, unknown>;
 }
 
 /**
@@ -16,6 +24,7 @@ interface ConnectedClient {
 export class MockPhoenixServer {
   private server: WebSocketServer | null = null;
   private clients: ConnectedClient[] = [];
+  private pendingDispatches = new Map<string, PendingDispatch>();
   private port = 0;
 
   async start(): Promise<void> {
@@ -93,9 +102,19 @@ export class MockPhoenixServer {
         }
 
         // Relay to matching recipients
+        const parsed = JSON.parse(envelope);
         for (const other of this.clients) {
           if (other.ws === ws) continue;
           if (recipients.length > 0 && !recipients.includes(other.did)) continue;
+
+          // Track dispatched message for trust-ping fallback on PASS
+          const msgId = parsed.id;
+          if (msgId && client) {
+            this.pendingDispatches.set(`${other.did}:${msgId}`, {
+              senderDid: client.did,
+              plaintext: parsed,
+            });
+          }
 
           other.ws.send(JSON.stringify([
             null, null, other.topic, "message",
@@ -105,12 +124,11 @@ export class MockPhoenixServer {
                 authorized: true,
                 sender_credentials: [],
               },
-              plaintext: JSON.parse(envelope),
+              plaintext: parsed,
             },
           ]));
         }
       } else if (event === "dispatch_reply") {
-        // Reply protocol: route reply back to the original sender
         if (ref) {
           ws.send(JSON.stringify([
             null, ref, topic, "phx_reply",
@@ -118,20 +136,42 @@ export class MockPhoenixServer {
           ]));
         }
 
-        const replyPayload = payload as { recipient: string; plaintext: string };
-        const target = this.clients.find((c) => c.did === replyPayload.recipient);
-        if (target) {
-          target.ws.send(JSON.stringify([
-            null, null, target.topic, "message",
-            {
-              context: {
-                recipient: target.did,
-                authorized: true,
-                sender_credentials: [],
-              },
-              plaintext: replyPayload.plaintext,
-            },
-          ]));
+        const replyPayload = payload as { message_id: string; status: string };
+
+        // On PASS, simulate cloud-node built-in trust-ping handling
+        if (replyPayload.status === "pass" && client) {
+          const key = `${client.did}:${replyPayload.message_id}`;
+          const pending = this.pendingDispatches.get(key);
+          this.pendingDispatches.delete(key);
+
+          if (pending && pending.plaintext.type === PING_TYPE) {
+            const body = pending.plaintext.body as Record<string, unknown> | undefined;
+            if (body?.responseRequested) {
+              // Send built-in ping-response back to the original sender
+              const sender = this.clients.find((c) => c.did === pending.senderDid);
+              if (sender) {
+                const responseId = `mock-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+                sender.ws.send(JSON.stringify([
+                  null, null, sender.topic, "message",
+                  {
+                    context: {
+                      recipient: sender.did,
+                      authorized: true,
+                      sender_credentials: [],
+                    },
+                    plaintext: {
+                      id: responseId,
+                      type: PING_RESPONSE_TYPE,
+                      from: client.did,
+                      to: [sender.did],
+                      thid: pending.plaintext.thid || pending.plaintext.id,
+                      body: {},
+                    },
+                  },
+                ]));
+              }
+            }
+          }
         }
       } else if (event === "heartbeat" || event === "phx_heartbeat") {
         ws.send(JSON.stringify([null, ref, "phoenix", "phx_reply", { status: "ok", response: {} }]));
