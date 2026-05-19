@@ -3,7 +3,9 @@ import type { ScenarioContext, SenderContext, ScenarioResult } from "./types.js"
 import { elapsedMs, clientConfig } from "./types.js";
 
 const ECHO_TYPE = "https://layr8.test/echo/1.0/request";
+const ECHO_RESPONSE_TYPE = "https://layr8.test/echo/1.0/response";
 const PING_TYPE = "https://didcomm.org/trust-ping/2.0/ping";
+const PING_RESPONSE_TYPE = "https://didcomm.org/trust-ping/2.0/ping-response";
 const WILDCARD_RESPONSE_TYPE = "https://layr8.test/wildcard/1.0/response";
 
 export async function runReceiver(
@@ -12,11 +14,18 @@ export async function runReceiver(
 ): Promise<void> {
   const client = new Layr8Client(logErrors(), clientConfig(ctx));
 
-  // Catch-all handler — responds to any message type
-  client.handleAll((msg) => ({
-    type: WILDCARD_RESPONSE_TYPE,
-    body: { received: msg.body, intercepted: true },
-  }));
+  client.handleAll((msg) => {
+    let replyType = WILDCARD_RESPONSE_TYPE;
+    if (msg.type === ECHO_TYPE) {
+      replyType = ECHO_RESPONSE_TYPE;
+    } else if (msg.type === PING_TYPE) {
+      replyType = PING_RESPONSE_TYPE;
+    }
+    return {
+      type: replyType,
+      body: { received: msg.body, intercepted: true },
+    };
+  });
 
   await client.connect(AbortSignal.timeout(ctx.timeout));
   if (onReady) onReady(client.did);
@@ -26,7 +35,6 @@ export async function runReceiver(
 export async function runSender(ctx: SenderContext): Promise<ScenarioResult> {
   const client = new Layr8Client(logErrors(), clientConfig(ctx));
 
-  // Register handlers so the cloud-node knows we speak these protocols
   client.handle(ECHO_TYPE, () => null);
   client.handle(PING_TYPE, () => null);
 
@@ -34,7 +42,6 @@ export async function runSender(ctx: SenderContext): Promise<ScenarioResult> {
   try {
     await client.connect(AbortSignal.timeout(ctx.timeout));
 
-    // 1. Send echo request — proves wildcard catches custom protocols
     const echoResp = await client.request(
       { type: ECHO_TYPE, to: [ctx.receiverDid], body: { data: ctx.testId } },
       { signal: AbortSignal.timeout(ctx.timeout) },
@@ -50,7 +57,6 @@ export async function runSender(ctx: SenderContext): Promise<ScenarioResult> {
       };
     }
 
-    // 2. Send trust-ping — proves wildcard catches standard protocols
     const pingResp = await client.request(
       { type: PING_TYPE, to: [ctx.receiverDid], body: { responseRequested: true } },
       { signal: AbortSignal.timeout(ctx.timeout) },
