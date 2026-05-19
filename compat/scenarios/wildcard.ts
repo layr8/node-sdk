@@ -38,9 +38,10 @@ export async function runSender(ctx: SenderContext): Promise<ScenarioResult> {
   client.handle(ECHO_TYPE, () => null);
   client.handle(PING_TYPE, () => null);
 
-  const start = Date.now();
+  let start = Date.now();
   try {
     await client.connect(AbortSignal.timeout(ctx.timeout));
+    start = Date.now();
 
     const echoResp = await client.request(
       { type: ECHO_TYPE, to: [ctx.receiverDid], body: { data: ctx.testId } },

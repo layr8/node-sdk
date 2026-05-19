@@ -29,9 +29,10 @@ export async function runSender(ctx: SenderContext): Promise<ScenarioResult> {
   // Register a dummy handler so the node accepts us
   client.handle(ECHO_TYPE, () => null);
 
-  const start = Date.now();
+  let start = Date.now();
   try {
     await client.connect(AbortSignal.timeout(ctx.timeout));
+    start = Date.now();
     const resp = await client.request(
       { type: ECHO_TYPE, to: [ctx.receiverDid], body: { ping: ctx.testId } },
       { signal: AbortSignal.timeout(ctx.timeout) },

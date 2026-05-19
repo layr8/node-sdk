@@ -23,9 +23,10 @@ export async function runSender(ctx: SenderContext): Promise<ScenarioResult> {
 
   client.handle(ECHO_TYPE, () => null);
 
-  const start = Date.now();
+  let start = Date.now();
   try {
     await client.connect(AbortSignal.timeout(ctx.timeout));
+    start = Date.now();
     await client.request(
       { type: ECHO_TYPE, to: [ctx.receiverDid], body: {} },
       { signal: AbortSignal.timeout(ctx.timeout) },
