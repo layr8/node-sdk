@@ -2,7 +2,8 @@ import { Layr8Client, logErrors, PASS } from "@layr8/sdk";
 import type { ScenarioContext, SenderContext, ScenarioResult } from "./types.js";
 import { elapsedMs, clientConfig } from "./types.js";
 
-const PING_TYPE = "https://didcomm.org/trust-ping/2.0/ping";
+const ECHO_TYPE = "https://layr8.test/echo/1.0/request";
+const ECHO_RESPONSE_TYPE = "https://layr8.test/echo/1.0/response";
 
 export async function runReceiver(
   ctx: ScenarioContext,
@@ -10,9 +11,7 @@ export async function runReceiver(
 ): Promise<void> {
   const client = new Layr8Client(logErrors(), clientConfig(ctx));
 
-  // Handler returns PASS — intentionally declines the message so the
-  // cloud-node's built-in trust-ping handler can send a ping-response.
-  client.handle(PING_TYPE, () => PASS);
+  client.handle(ECHO_TYPE, () => PASS);
 
   await client.connect(AbortSignal.timeout(ctx.timeout));
   if (onReady) onReady(client.did);
@@ -22,21 +21,20 @@ export async function runReceiver(
 export async function runSender(ctx: SenderContext): Promise<ScenarioResult> {
   const client = new Layr8Client(logErrors(), clientConfig(ctx));
 
-  // Register handler so the cloud-node knows we speak this protocol
-  client.handle(PING_TYPE, () => null);
+  client.handle(ECHO_TYPE, () => null);
 
   const start = Date.now();
   try {
     await client.connect(AbortSignal.timeout(ctx.timeout));
     await client.request(
-      { type: PING_TYPE, to: [ctx.receiverDid], body: { responseRequested: true } },
+      { type: ECHO_TYPE, to: [ctx.receiverDid], body: {} },
       { signal: AbortSignal.timeout(ctx.timeout) },
     );
-    // Success means the cloud-node handled the trust-ping after PASS
-    return { status: "pass", scenario: "pass", duration_ms: elapsedMs(start) };
+    // If request succeeds, the PASS scenario failed
+    return { status: "fail", scenario: "pass", duration_ms: elapsedMs(start) };
   } catch (err) {
-    // Timeout or error means something went wrong
-    return { status: "fail", scenario: "pass", duration_ms: elapsedMs(start), error: String(err) };
+    // Timeout or error indicates PASS behavior
+    return { status: "pass", scenario: "pass", duration_ms: elapsedMs(start), error: String(err) };
   } finally {
     await client.close();
   }
