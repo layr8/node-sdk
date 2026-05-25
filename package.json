@@ -1,6 +1,6 @@
 {
   "name": "@layr8/sdk",
-  "version": "0.1.12",
+  "version": "0.2.0",
   "description": "Layr8 DIDComm Agent SDK for Node.js",
   "type": "module",
   "main": "./dist/index.js",
@@ -20,7 +20,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "tsc --noEmit",
-"compat:test": "vitest run --config compat/vitest.config.ts",
+    "compat:test": "vitest run --config compat/vitest.config.ts",
     "compat:build": "tsc -p compat/tsconfig.build.json"
   },
   "engines": {

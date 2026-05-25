@@ -1,0 +1,33 @@
+# Changelog
+
+All notable changes to `@layr8/sdk`. Format loosely follows [Keep a Changelog](https://keepachangelog.com/); versioning follows [SemVer](https://semver.org/).
+
+This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git history.
+
+## [0.2.0] - 2026-05-25
+
+### Added
+
+- **Multi-DID hosting on one WebSocket** (`#35`). `Layr8Client.joinDid(did, opts)` opens an additional Phoenix channel for `did` over the existing WS and returns a `DidHandle` with per-DID `.send` / `.request` / `.sendAck`. `leaveDid(did)` tears it down. `opts.handlers` accepts a per-DID handler map (or `{ fn, manualAck }` entries) that fires first; the client-global registry registered via `handle(...)` is the fallback. Cloud-node needs zero changes — Phoenix natively supports N joins per socket via `channel("plugins:*", Channel)`.
+- **`Connection` + `Channel` split**, formerly the `PhoenixChannel` monolith. `Connection` owns the WebSocket, the global ref counter, the pending-reply table (shared across topics), the Phoenix-heartbeat watchdog, the WS-level ping/pong, the reconnect loop, and the topic → `Channel` registry. `Channel` owns one joined `plugins:<did>` topic, joinRef, `phx_join` handshake, and per-topic send/sendFireAndForget/sendAck. Both are exported.
+- `joinDid` auto-subscribes to the problem-report protocol, mirroring the same auto-add already done by `connect()` for the primary DID.
+
+### Changed
+
+- Reconnect rejoins every registered Channel after the WebSocket is re-dialed. **Single-DID** rejoin failure propagates to the backoff loop (matches pre-refactor `PhoenixChannel` behaviour so ember and other single-DID consumers don't end up in a silently-broken "reconnected but `Channel.send` throws" state). **Multi-DID** rejoin failures are isolated per Channel — one Instance's transient join failure does not stall the others.
+- `Channel.send` / `sendFireAndForget` now also throw `NotConnectedError` when the Channel's most recent rejoin failed (`joined = false`), avoiding silent drops on the wire when the cloud-node has no subscription for the topic.
+
+### Deprecated
+
+- `PhoenixChannel` is retained as a thin facade over `Connection` + `Channel` so existing single-DID consumers and the existing `tests/channel.test.ts` integration tests continue to work unchanged. Slated for removal in a follow-up once consumers and tests are migrated to `Connection` / `Channel` directly.
+
+### Fixed
+
+- `Connection.dialImpl` now closes the previous WebSocket at the start of every dial attempt. Previously, a failed rejoin in the reconnect loop would leak the prior WebSocket — server-side it stayed open, and tests that call `server.close()` would hang waiting for clients to disconnect.
+
+### Tests
+
+- 16 new tests under `tests/multi-did.test.ts` covering `joinDid` lifecycle (before connect, duplicate DID, primary-DID rejection, `leaveDid`, close-tears-down-all), inbound routing by topic (per-DID first, fallback to client-global, override priority, unrelated topic drops), `DidHandle.send` (writes to its own topic, stamps `from`), and three reconnect scenarios (rejoin every Channel after WS drops, isolated rejoin failure in multi-DID, single-DID rejoin failure retries the backoff loop).
+- 3 small test-bug fixes in `tests/client.test.ts` where the wrong topic literal (`plugin:lobby`, singular and incorrect) was masked by the old monolith's lack of topic routing. Updated to `plugins:<agentDid>` to match production.
+
+[0.2.0]: https://github.com/layr8/node-sdk/releases/tag/v0.2.0
