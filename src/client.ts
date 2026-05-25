@@ -319,6 +319,14 @@ export class Layr8Client extends EventEmitter {
       throw new Error(`joinDid: DID already joined: ${did}`);
     }
 
+    // Always subscribe to the problem-report protocol on this DID so the
+    // cloud-node can deliver problem reports targeted at it (mirrors the
+    // auto-add in `connect()`). Skip when the caller already has it.
+    const PROBLEM_REPORT_PROTOCOL = "https://didcomm.org/report-problem/2.0";
+    const protocols = opts.protocols.includes(PROBLEM_REPORT_PROTOCOL)
+      ? opts.protocols
+      : [...opts.protocols, PROBLEM_REPORT_PROTOCOL];
+
     const channel = new Channel(
       this.connection,
       did,
@@ -329,7 +337,7 @@ export class Layr8Client extends EventEmitter {
     );
 
     try {
-      await channel.join(opts.protocols, opts.signal);
+      await channel.join(protocols, opts.signal);
     } catch (err) {
       // Leave the Channel registered as cleanup — Channel.leave will
       // unregister it. Best-effort.
