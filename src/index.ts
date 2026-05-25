@@ -8,6 +8,7 @@ export type {
 export type { Config, DidSpec, VerificationMethod } from "./config.js";
 export { DEFAULT_DID_SPEC } from "./config.js";
 export type {
+  Attachment,
   Message,
   MessageContext,
   SenderCredential,
@@ -22,6 +23,7 @@ export {
   createMessage,
 } from "./message.js";
 export type { HandlerFn, HandlerOptions } from "./handler.js";
+export { PASS } from "./handler.js";
 export {
   Layr8Error,
   NotConnectedError,

@@ -46,6 +46,14 @@ export class Channel {
    */
   topic: string;
   private readonly callbacks: ChannelCallbacks;
+  /**
+   * Whether the cloud-node negotiated the `reply_protocol/1` capability at
+   * join time. Capability arrives in the `response.capabilities` array of
+   * the `phx_reply` to our `phx_join`. Channel-level state because the
+   * negotiation happens per-channel (each join can in principle land on a
+   * different node version, though in practice the whole WS is one node).
+   */
+  private replyProtocolEnabled = false;
   private readonly didSpec: Required<DidSpec>;
 
   private joinRef = "";
@@ -177,6 +185,16 @@ export class Channel {
     return this.assignedDIDVal;
   }
 
+  /**
+   * Whether the cloud-node supports the `reply_protocol/1` capability for
+   * this Channel — set from `response.capabilities` in the join reply.
+   * `false` until `join()` resolves; stays `false` if the server doesn't
+   * advertise the capability.
+   */
+  replyProtocol(): boolean {
+    return this.replyProtocolEnabled;
+  }
+
   /** True once `join()` has resolved successfully. */
   isJoined(): boolean {
     return this.joined && !this.left;
@@ -244,10 +262,14 @@ export class Channel {
     if (spec.label) {
       didSpecPayload.label = spec.label;
     }
+    if (spec.controller) {
+      didSpecPayload.controller = spec.controller;
+    }
 
     const joinPayload = {
       payload_types: this.protocols,
       did_spec: didSpecPayload,
+      reply_protocol: true,
     };
 
     if (signal?.aborted) {
@@ -292,13 +314,18 @@ export class Channel {
 
     const reply = rawReply as {
       status?: string;
-      response?: { did?: string; reason?: string };
+      response?: { did?: string; reason?: string; capabilities?: string[] };
     };
     if (reply.status !== "ok") {
       const reason =
         reply.response?.reason ?? `join rejected: ${reply.status ?? "unknown"}`;
       throw new ConnectionError(this.topic, reason);
     }
+    // Capability negotiation: the cloud-node echoes the capabilities it
+    // accepts in `response.capabilities`. We only care about
+    // `reply_protocol/1` today.
+    const caps = reply.response?.capabilities ?? [];
+    this.replyProtocolEnabled = caps.includes("reply_protocol/1");
     if (reply.response?.did) {
       this.assignedDIDVal = reply.response.did;
       // Auto-DID path: only when the Channel was constructed with an
@@ -401,6 +428,11 @@ export class PhoenixChannel {
 
   assignedDID(): string {
     return this.channel?.assignedDID() ?? "";
+  }
+
+  /** See `Channel.replyProtocol()` — delegates to the inner Channel. */
+  replyProtocol(): boolean {
+    return this.channel?.replyProtocol() ?? false;
   }
 
   close(): void {

@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "skipLibCheck": true,
+    "noCheck": true,
+    "outDir": "./dist",
+    "rootDir": ".",
+    "declaration": false
+  },
+  "include": ["scenarios/**/*.ts", "bin/**/*.ts"],
+  "exclude": ["node_modules", "dist", "tests"]
+}

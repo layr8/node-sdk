@@ -1,6 +1,6 @@
 {
   "name": "@layr8/sdk",
-  "version": "0.1.0",
+  "version": "0.1.12",
   "description": "Layr8 DIDComm Agent SDK for Node.js",
   "type": "module",
   "main": "./dist/index.js",
@@ -12,13 +12,16 @@
       "default": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "tsc --noEmit",
-    "test:integration": "tsx tests/integration-test.ts"
+"compat:test": "vitest run --config compat/vitest.config.ts",
+    "compat:build": "tsc -p compat/tsconfig.build.json"
   },
   "engines": {
     "node": ">=20"
@@ -33,6 +36,10 @@
     "@types/uuid": "^10.0.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/layr8/node-sdk"
   },
   "license": "MIT"
 }
