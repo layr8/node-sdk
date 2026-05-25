@@ -450,7 +450,7 @@ describe("Layr8Client", () => {
 
     await client.connect();
 
-    server.sendToClient(null, null, "plugin:lobby", "message", {
+    server.sendToClient(null, null, "plugins:did:web:alice", "message", {
       context: {
         recipient: "did:web:alice",
         authorized: true,
@@ -507,7 +507,7 @@ describe("Layr8Client", () => {
 
     await client.connect();
 
-    server.sendToClient(null, null, "plugin:lobby", "message", {
+    server.sendToClient(null, null, "plugins:did:web:alice", "message", {
       plaintext: {
         id: "req-1",
         type: "https://layr8.io/protocols/echo/1.0/request",
@@ -557,7 +557,7 @@ describe("Layr8Client", () => {
 
     await client.connect();
 
-    server.sendToClient(null, null, "plugin:lobby", "message", {
+    server.sendToClient(null, null, "plugins:did:web:alice", "message", {
       plaintext: {
         id: "req-1",
         type: "https://layr8.io/protocols/echo/1.0/request",
@@ -700,7 +700,7 @@ describe("Layr8Client", () => {
     await client.connect();
 
     // Send garbage that can't be parsed as DIDComm
-    server.sendToClient(null, null, "plugin:lobby", "message", "not-a-didcomm-message");
+    server.sendToClient(null, null, "plugins:did:web:test", "message", "not-a-didcomm-message");
     await delay(200);
 
     expect(errors.length).toBeGreaterThan(0);
@@ -715,7 +715,7 @@ describe("Layr8Client", () => {
     client.handle("https://layr8.io/protocols/echo/1.0/request", async () => null);
     await client.connect();
 
-    server.sendToClient(null, null, "plugin:lobby", "message", {
+    server.sendToClient(null, null, "plugins:did:web:test", "message", {
       plaintext: {
         id: "msg-1",
         type: "https://unknown.org/protocol/1.0/unknown",
@@ -737,7 +737,7 @@ describe("Layr8Client", () => {
     client.handle("https://layr8.io/protocols/echo/1.0/request", async () => { throw new Error("boom"); });
     await client.connect();
 
-    server.sendToClient(null, null, "plugin:lobby", "message", {
+    server.sendToClient(null, null, "plugins:did:web:alice", "message", {
       plaintext: { id: "req-1", type: "https://layr8.io/protocols/echo/1.0/request", from: "did:web:bob", body: {} },
     });
     await delay(500);
@@ -1119,7 +1119,7 @@ describe("Layr8Client reply protocol", () => {
     await client.connect();
 
     server.clearReceived();
-    server.sendToClient(null, null, "plugin:lobby", "message", {
+    server.sendToClient(null, null, "plugins:did:web:alice", "message", {
       plaintext: {
         id: "req-1",
         type: "https://layr8.io/protocols/echo/1.0/request",
@@ -1157,7 +1157,7 @@ describe("Layr8Client reply protocol", () => {
     await client.connect();
 
     server.clearReceived();
-    server.sendToClient(null, null, "plugin:lobby", "message", {
+    server.sendToClient(null, null, "plugins:did:web:alice", "message", {
       plaintext: {
         id: "req-2",
         type: "https://layr8.io/protocols/echo/1.0/request",
@@ -1197,7 +1197,7 @@ describe("Layr8Client reply protocol", () => {
     await client.connect();
 
     server.clearReceived();
-    server.sendToClient(null, null, "plugin:lobby", "message", {
+    server.sendToClient(null, null, "plugins:did:web:alice", "message", {
       plaintext: {
         id: "unknown-1",
         type: "https://unknown.org/protocol/1.0/unknown",
@@ -1229,7 +1229,7 @@ describe("Layr8Client reply protocol", () => {
     await client.connect();
 
     server.clearReceived();
-    server.sendToClient(null, null, "plugin:lobby", "message", {
+    server.sendToClient(null, null, "plugins:did:web:alice", "message", {
       plaintext: {
         id: "req-pass",
         type: "https://layr8.io/protocols/echo/1.0/request",
@@ -1260,7 +1260,7 @@ describe("Layr8Client reply protocol", () => {
     await client.connect();
 
     server.clearReceived();
-    server.sendToClient(null, null, "plugin:lobby", "message", {
+    server.sendToClient(null, null, "plugins:did:web:alice", "message", {
       plaintext: {
         id: "req-err",
         type: "https://layr8.io/protocols/echo/1.0/request",
@@ -1294,7 +1294,7 @@ describe("Layr8Client reply protocol", () => {
     await client.connect();
 
     server.clearReceived();
-    server.sendToClient(null, null, "plugin:lobby", "message", {
+    server.sendToClient(null, null, "plugins:did:web:alice", "message", {
       plaintext: {
         id: "req-noack",
         type: "https://layr8.io/protocols/echo/1.0/request",
@@ -1323,7 +1323,7 @@ describe("Layr8Client reply protocol", () => {
     await client.connect();
 
     server.clearReceived();
-    server.sendToClient(null, null, "plugin:lobby", "message", {
+    server.sendToClient(null, null, "plugins:did:web:alice", "message", {
       plaintext: {
         id: "legacy-1",
         type: "https://didcomm.org/basicmessage/2.0/message",
@@ -1360,7 +1360,7 @@ describe("Layr8Client handleAll", () => {
     });
     await client.connect();
 
-    server.sendToClient(null, null, "plugin:lobby", "message", {
+    server.sendToClient(null, null, "plugins:did:web:alice", "message", {
       plaintext: {
         id: "any-1",
         type: "https://any.org/protocol/1.0/anything",
@@ -1396,7 +1396,7 @@ describe("Layr8Client handleAll", () => {
     await client.connect();
 
     // Send a message that matches the specific handler
-    server.sendToClient(null, null, "plugin:lobby", "message", {
+    server.sendToClient(null, null, "plugins:did:web:alice", "message", {
       plaintext: {
         id: "specific-1",
         type: "https://layr8.io/protocols/echo/1.0/request",
@@ -1405,7 +1405,7 @@ describe("Layr8Client handleAll", () => {
       },
     });
     // Send a message that falls through to catch-all
-    server.sendToClient(null, null, "plugin:lobby", "message", {
+    server.sendToClient(null, null, "plugins:did:web:alice", "message", {
       plaintext: {
         id: "catchall-1",
         type: "https://other.org/protocol/1.0/msg",
@@ -1431,7 +1431,7 @@ describe("Layr8Client handleAll", () => {
     await client.connect();
 
     server.clearReceived();
-    server.sendToClient(null, null, "plugin:lobby", "message", {
+    server.sendToClient(null, null, "plugins:did:web:alice", "message", {
       plaintext: {
         id: "pass-1",
         type: "https://any.org/protocol/1.0/anything",

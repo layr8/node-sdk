@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import type { Config } from "./config.js";
+import type { Config, DidSpec } from "./config.js";
 import { resolveConfig } from "./config.js";
 import type {
   Credential,
@@ -34,7 +34,8 @@ import {
   marshalDIDComm,
   parseDIDComm,
 } from "./message.js";
-import { PhoenixChannel } from "./channel.js";
+import { Connection } from "./connection.js";
+import { Channel } from "./channel.js";
 import { RestClient, restUrlFromWebSocket } from "./rest.js";
 
 function toError(err: unknown): Error {
@@ -55,24 +56,104 @@ export interface SendOptions {
   fireAndForget?: boolean;
 }
 
+/** Per-DID handler entry passed to `joinDid`. */
+export interface JoinDidHandler {
+  fn: HandlerFn;
+  manualAck?: boolean;
+}
+
+/** Options for `joinDid`. */
+export interface JoinDidOptions {
+  /** Protocols this Channel will subscribe to (cloud-node `payload_types`). */
+  protocols: string[];
+  /**
+   * Per-DID handlers. A handler registered here fires for messages received
+   * on THIS DID's Channel; the client-global registry (`client.handle(...)`)
+   * is the fallback when this map has no entry for the inbound type.
+   *
+   * Accepts a bare `HandlerFn` for the auto-ack default, or
+   * `{ fn, manualAck }` to opt into manual acknowledgement.
+   */
+  handlers?: Record<string, HandlerFn | JoinDidHandler>;
+  /** DID spec for the join's `did_spec` payload (matches the global Config shape). */
+  didSpec?: DidSpec;
+  /** Abort the join. */
+  signal?: AbortSignal;
+}
+
+/**
+ * Handle for an additional DID hosted on the Layr8Client's WebSocket.
+ * Returned by `Layr8Client.joinDid`.
+ *
+ * The handle is the per-DID counterpart to `Layr8Client.send` /
+ * `client.request` / `client.sendAck`: all of those operate on the primary
+ * DID (the one passed to `connect()`); a `DidHandle.send` operates on its
+ * own Channel and stamps `from = this.did` on outbound messages.
+ */
+export class DidHandle {
+  constructor(
+    /** @internal */ readonly _client: Layr8Client,
+    /** @internal */ readonly _channel: Channel,
+  ) {}
+
+  /** The DID this handle hosts. */
+  get did(): string {
+    return this._channel.did;
+  }
+
+  /**
+   * Send a message FROM this DID. By default waits for server
+   * acknowledgment. Pass `{ fireAndForget: true }` to skip.
+   */
+  async send(msg: Partial<Message>, opts?: SendOptions): Promise<void> {
+    return this._client._sendOnChannel(this._channel, msg, opts);
+  }
+
+  /**
+   * Send a message FROM this DID and wait for a correlated response on the
+   * SAME DID's Channel.
+   */
+  async request(
+    msg: Partial<Message>,
+    opts?: RequestOptions,
+  ): Promise<Message> {
+    return this._client._requestOnChannel(this._channel, msg, opts);
+  }
+
+  /** Ack inbound message ids on this DID's Channel. */
+  sendAck(ids: string[]): void {
+    this._channel.sendAck(ids);
+  }
+}
+
 /**
  * Layr8Client is the main entry point for interacting with the Layr8 platform.
  *
- * Lifecycle: new Layr8Client → handle (register handlers) → connect → ... → close
+ * Lifecycle: `new Layr8Client` → `handle` (register handlers) → `connect`
+ * → (optionally `joinDid` to host additional DIDs) → ... → `close`.
  *
- * Extends EventEmitter for "disconnect" and "reconnect" events.
+ * Extends EventEmitter for "disconnect", "reconnect", "inbound" and
+ * "outbound" events.
  */
 export class Layr8Client extends EventEmitter {
   private readonly cfg;
   private readonly onError: ErrorHandler;
   private readonly registry = new HandlerRegistry();
-  private channel: PhoenixChannel | null = null;
+
+  private connection: Connection | null = null;
+  /** Primary DID's Channel (joined via `connect()`). */
+  private primaryChannel: Channel | null = null;
+  /** Additional DIDs joined via `joinDid()`, keyed by DID. */
+  private readonly didChannels = new Map<string, Channel>();
+  /** Per-DID handler registries — keyed by DID. */
+  private readonly didHandlers = new Map<string, HandlerRegistry>();
+
   private connected = false;
   private isClosed = false;
   private agentDid: string;
   private readonly rest: RestClient;
 
-  /** Correlation map for Request/Response pattern: threadId → {resolve, reject} */
+  /** Correlation map for Request/Response: threadId → {resolve, reject}. */
   private readonly pending = new Map<
     string,
     { resolve: (msg: InternalMessage) => void; reject: (err: Error) => void }
@@ -94,13 +175,16 @@ export class Layr8Client extends EventEmitter {
     );
   }
 
-  /** The agent's DID — either provided in Config or assigned by the node on connect(). */
+  /** The primary agent's DID — either provided in Config or assigned by the node on connect(). */
   get did(): string {
     return this.agentDid;
   }
 
   /**
-   * Register a handler for a DIDComm message type.
+   * Register a handler for a DIDComm message type on the client-global
+   * registry. Applies to every joined DID's Channel as the fallback when
+   * no per-DID handler is registered for the inbound type.
+   *
    * Must be called BEFORE connect(). Throws AlreadyConnectedError after.
    */
   handle(
@@ -115,7 +199,12 @@ export class Layr8Client extends EventEmitter {
   }
 
   /**
-   * Register a catch-all handler for any message type not matched by a specific handler.
+   * Register a catch-all handler for any inbound message type that has no
+   * specific handler registered via `handle()`. Internally stored on the
+   * registry's catch-all slot — `registry.lookup(type)` returns it as the
+   * fallback. Subscribes to the wildcard protocol (`"*"`) so the
+   * cloud-node delivers traffic regardless of protocol.
+   *
    * Must be called BEFORE connect(). Throws AlreadyConnectedError after.
    */
   handleAll(
@@ -148,8 +237,8 @@ export class Layr8Client extends EventEmitter {
   }
 
   /**
-   * Establish WebSocket connection and join the Phoenix Channel
-   * with protocols derived from registered handlers.
+   * Establish the WebSocket Connection and join the primary DID's Phoenix
+   * Channel with protocols derived from registered handlers.
    */
   async connect(signal?: AbortSignal): Promise<void> {
     if (this.connected) throw new AlreadyConnectedError();
@@ -157,46 +246,159 @@ export class Layr8Client extends EventEmitter {
 
     const protocols = this.registry.protocols();
 
-    // Always subscribe to the problem-report protocol so nodes can deliver
-    // problem reports back to us (e.g., when B is disconnected or passes).
+    // Always subscribe to the problem-report protocol so the cloud-node
+    // can deliver problem reports back to us (e.g., when a peer is
+    // disconnected or a handler PASSes). Skipped when a catch-all handler
+    // is registered (`"*"` in the protocol list) — wildcard already
+    // covers every protocol.
     const PROBLEM_REPORT_PROTOCOL = "https://didcomm.org/report-problem/2.0";
     if (!protocols.includes("*") && !protocols.includes(PROBLEM_REPORT_PROTOCOL)) {
       protocols.push(PROBLEM_REPORT_PROTOCOL);
     }
 
-    const channel = new PhoenixChannel(
-      this.cfg.nodeUrl,
-      this.cfg.apiKey,
+    this.connection = new Connection(this.cfg.nodeUrl, this.cfg.apiKey, {
+      onDisconnect: (err) => this.emit("disconnect", err),
+      onReconnect: () => this.emit("reconnect"),
+    });
+
+    try {
+      await this.connection.dial(signal);
+    } catch (err) {
+      this.connection = null;
+      throw err;
+    }
+
+    // The primary Channel's onMessage closure remembers `agentDid` AS IT IS
+    // when join() resolves. For the auto-DID case the topic gets rekeyed
+    // there too, and the dispatcher reads the DID from the Channel rather
+    // than this closure — see `dispatchInbound`.
+    const channel = new Channel(
+      this.connection,
       this.cfg.agentDid,
       {
-        onMessage: (payload) => this.handleInboundMessage(payload),
-        onDisconnect: (err) => this.emit("disconnect", err),
-        onReconnect: () => this.emit("reconnect"),
+        onMessage: (payload) => this.dispatchInbound(channel, payload),
       },
       this.cfg.didSpec,
     );
 
-    await channel.connect(protocols, signal);
+    try {
+      await channel.join(protocols, signal);
+    } catch (err) {
+      this.connection.close();
+      this.connection = null;
+      throw err;
+    }
 
-    // If no DID was provided, use the one assigned by the node
     if (!this.agentDid && channel.assignedDID()) {
       this.agentDid = channel.assignedDID();
     }
 
-    this.channel = channel;
+    this.primaryChannel = channel;
     this.connected = true;
   }
 
-  /** Gracefully shut down the client connection. */
+  /**
+   * Join an additional Phoenix Channel for `did` over the existing
+   * WebSocket. Returns a `DidHandle` for sending/receiving on that DID.
+   *
+   * The Connection (and primary Channel) must already be `connect()`-ed.
+   * Per-DID handlers passed in `opts.handlers` fire first; the client-global
+   * registry is the fallback.
+   */
+  async joinDid(did: string, opts: JoinDidOptions): Promise<DidHandle> {
+    if (!this.connected || !this.connection) {
+      throw new NotConnectedError();
+    }
+    if (this.isClosed) throw new ClientClosedError();
+    if (did === this.agentDid) {
+      throw new Error(
+        "joinDid: this DID is already hosted by connect() — use client.send / client.request directly",
+      );
+    }
+    if (this.didChannels.has(did)) {
+      throw new Error(`joinDid: DID already joined: ${did}`);
+    }
+
+    // Always subscribe to the problem-report protocol on this DID so the
+    // cloud-node can deliver problem reports targeted at it (mirrors the
+    // auto-add in `connect()`). Skip when the caller already has it.
+    const PROBLEM_REPORT_PROTOCOL = "https://didcomm.org/report-problem/2.0";
+    const protocols = opts.protocols.includes(PROBLEM_REPORT_PROTOCOL)
+      ? opts.protocols
+      : [...opts.protocols, PROBLEM_REPORT_PROTOCOL];
+
+    const channel = new Channel(
+      this.connection,
+      did,
+      {
+        onMessage: (payload) => this.dispatchInbound(channel, payload),
+      },
+      opts.didSpec,
+    );
+
+    try {
+      await channel.join(protocols, opts.signal);
+    } catch (err) {
+      // Leave the Channel registered as cleanup — Channel.leave will
+      // unregister it. Best-effort.
+      try { channel.leave(); } catch { /* ignore */ }
+      throw err;
+    }
+
+    this.didChannels.set(did, channel);
+
+    if (opts.handlers && Object.keys(opts.handlers).length > 0) {
+      const reg = new HandlerRegistry();
+      for (const [msgType, h] of Object.entries(opts.handlers)) {
+        if (typeof h === "function") {
+          reg.register(msgType, h);
+        } else {
+          reg.register(msgType, h.fn, h.manualAck ? { manualAck: true } : undefined);
+        }
+      }
+      this.didHandlers.set(did, reg);
+    }
+
+    return new DidHandle(this, channel);
+  }
+
+  /**
+   * `phx_leave` the Channel for `did` and tear down its per-DID handlers.
+   * The Connection (and other Channels) stay open. No-op if `did` was not
+   * joined via `joinDid` (the primary DID can only be left via `close()`).
+   */
+  async leaveDid(did: string): Promise<void> {
+    const channel = this.didChannels.get(did);
+    if (!channel) return;
+    channel.leave();
+    this.didChannels.delete(did);
+    this.didHandlers.delete(did);
+  }
+
+  /** Gracefully shut down the client. Leaves every Channel and closes the WS. */
   async close(): Promise<void> {
     if (this.isClosed) return;
     this.isClosed = true;
     this.connected = false;
 
-    if (this.channel) {
-      this.channel.close();
-      this.channel = null;
+    // Leave secondary Channels first so per-DID handlers can drain — the
+    // Connection.close call below also fires `onConnectionClose` on every
+    // registered Channel, so the order doesn't strictly matter, but it
+    // keeps the leaveDid path symmetric.
+    for (const did of Array.from(this.didChannels.keys())) {
+      try {
+        const ch = this.didChannels.get(did);
+        ch?.leave();
+      } catch { /* ignore */ }
     }
+    this.didChannels.clear();
+    this.didHandlers.clear();
+
+    if (this.connection) {
+      this.connection.close();
+      this.connection = null;
+    }
+    this.primaryChannel = null;
 
     // Reject all pending requests
     for (const [threadId, pending] of this.pending) {
@@ -208,106 +410,32 @@ export class Layr8Client extends EventEmitter {
   /**
    * Send a message. By default waits for server acknowledgment.
    * Pass `{ fireAndForget: true }` to skip waiting for the server reply.
+   *
+   * Sends FROM the primary DID. For an additional DID, use the `DidHandle`
+   * returned by `joinDid` instead.
    */
   async send(msg: Partial<Message>, opts?: SendOptions): Promise<void> {
-    if (!this.connected || !this.channel) {
+    if (!this.connected || !this.primaryChannel) {
       throw new NotConnectedError();
     }
-
-    const internal = this.fillMessage(msg);
-
-    if (opts?.fireAndForget) {
-      this.sendMessageFireAndForget(internal);
-      return;
-    }
-
-    await this.sendMessageAcked(internal);
+    return this._sendOnChannel(this.primaryChannel, msg, opts);
   }
 
   /**
    * Send a message and wait for a correlated response.
    * Throws on timeout (AbortSignal), ProblemReportError, or NotConnectedError.
+   *
+   * Sends FROM the primary DID. For an additional DID, use the `DidHandle`
+   * returned by `joinDid` instead.
    */
   async request(
     msg: Partial<Message>,
     opts?: RequestOptions,
   ): Promise<Message> {
-    if (!this.connected || !this.channel) {
+    if (!this.connected || !this.primaryChannel) {
       throw new NotConnectedError();
     }
-
-    const internal = this.fillMessage(msg);
-    if (!internal.threadId) {
-      internal.threadId = generateId();
-    }
-    if (opts?.parentThread) {
-      internal.parentThreadId = opts.parentThread;
-    }
-
-    return new Promise<Message>((resolve, reject) => {
-      const signal = opts?.signal;
-
-      if (signal?.aborted) {
-        reject(signal.reason ?? new Error("aborted"));
-        return;
-      }
-
-      const cleanup = () => {
-        this.pending.delete(internal.threadId);
-        signal?.removeEventListener("abort", onAbort);
-      };
-
-      const onAbort = () => {
-        cleanup();
-        reject(signal!.reason ?? new Error("aborted"));
-      };
-
-      signal?.addEventListener("abort", onAbort, { once: true });
-
-      this.pending.set(internal.threadId, {
-        resolve: (resp: InternalMessage) => {
-          cleanup();
-
-          // Check if response is a problem report
-          if (
-            resp.type ===
-            "https://didcomm.org/report-problem/2.0/problem-report"
-          ) {
-            const body = ((resp.bodyRaw ?? resp.body) ?? {}) as Record<string, unknown>;
-            const attachments = ((resp as any).attachments ?? []) as unknown[];
-            reject(
-              new ProblemReportError(
-                (body?.code as string) ?? "unknown",
-                (body?.comment as string) ?? "unknown error",
-                body,
-                attachments,
-              ),
-            );
-            return;
-          }
-          resolve(resp);
-        },
-        reject: (err: Error) => {
-          cleanup();
-          reject(err);
-        },
-      });
-
-      this.emit("outbound", internal);
-      this.channel!.send("message", JSON.parse(marshalDIDComm(internal)))
-        .then((reply) => {
-          if (reply.status === "error") {
-            cleanup();
-            reject(new ServerRejectError(reply.reason || reply.status));
-            return;
-          }
-          // Server accepted, keep waiting for DIDComm response
-        })
-        .catch((err) => {
-          cleanup();
-          reject(err);
-        });
-    });
+    return this._requestOnChannel(this.primaryChannel, msg, opts);
   }
 
   // --- W3C Verifiable Credential APIs (REST, no WebSocket required) ---
@@ -443,27 +571,127 @@ export class Layr8Client extends EventEmitter {
     );
   }
 
-  private sendReplyMessage(resp: Partial<Message>, original: InternalMessage): void {
-    try {
-      const internal = this.fillMessage(resp);
-      if (!internal.to.length && original.from) {
-        internal.to = [original.from];
-      }
-      if (!internal.threadId) {
-        internal.threadId = original.threadId || original.id;
-      }
-      this.sendMessage(internal);
-    } catch (err) {
-      this.onError(new SDKError(ErrorKind.TransportWrite, {
-        messageId: original.id,
-        type: original.type,
-        from: original.from,
-        cause: toError(err),
-      }));
+  // --- internal: per-Channel send/request helpers (used by DidHandle too) ---
+
+  /** @internal */
+  async _sendOnChannel(
+    channel: Channel,
+    msg: Partial<Message>,
+    opts?: SendOptions,
+  ): Promise<void> {
+    const internal = this.fillMessageFrom(msg, channel.did);
+
+    if (opts?.fireAndForget) {
+      this.safeEmit("outbound", internal);
+      const data = marshalDIDComm(internal);
+      channel.sendFireAndForget("message", JSON.parse(data));
+      return;
+    }
+
+    this.safeEmit("outbound", internal);
+    const data = marshalDIDComm(internal);
+    const reply = await channel.send("message", JSON.parse(data));
+    if (reply.status === "error") {
+      throw new ServerRejectError(reply.reason || reply.status);
     }
   }
 
-  private handleInboundMessage(payload: unknown): void {
+  /** @internal */
+  async _requestOnChannel(
+    channel: Channel,
+    msg: Partial<Message>,
+    opts?: RequestOptions,
+  ): Promise<Message> {
+    const internal = this.fillMessageFrom(msg, channel.did);
+    if (!internal.threadId) {
+      internal.threadId = generateId();
+    }
+    if (opts?.parentThread) {
+      internal.parentThreadId = opts.parentThread;
+    }
+
+    return new Promise<Message>((resolve, reject) => {
+      const signal = opts?.signal;
+      if (signal?.aborted) {
+        reject(signal.reason ?? new Error("aborted"));
+        return;
+      }
+
+      const cleanup = () => {
+        this.pending.delete(internal.threadId);
+        signal?.removeEventListener("abort", onAbort);
+      };
+
+      const onAbort = () => {
+        cleanup();
+        reject(signal!.reason ?? new Error("aborted"));
+      };
+
+      signal?.addEventListener("abort", onAbort, { once: true });
+
+      this.pending.set(internal.threadId, {
+        resolve: (resp: InternalMessage) => {
+          cleanup();
+          if (
+            resp.type ===
+            "https://didcomm.org/report-problem/2.0/problem-report"
+          ) {
+            const body = ((resp.bodyRaw ?? resp.body) ?? {}) as Record<string, unknown>;
+            const attachments = ((resp as any).attachments ?? []) as unknown[];
+            reject(
+              new ProblemReportError(
+                (body?.code as string) ?? "unknown",
+                (body?.comment as string) ?? "unknown error",
+                body,
+                attachments,
+              ),
+            );
+            return;
+          }
+          resolve(resp);
+        },
+        reject: (err: Error) => {
+          cleanup();
+          reject(err);
+        },
+      });
+
+      this.safeEmit("outbound", internal);
+      channel.send("message", JSON.parse(marshalDIDComm(internal)))
+        .then((reply) => {
+          if (reply.status === "error") {
+            cleanup();
+            reject(new ServerRejectError(reply.reason || reply.status));
+            return;
+          }
+        })
+        .catch((err) => {
+          cleanup();
+          reject(err);
+        });
+    });
+  }
+
+  // --- internal: inbound dispatch ---
+
+  /**
+   * Receives one inbound frame from a Channel. Dispatch flow:
+   *
+   *   1. Parse the DIDComm.
+   *   2. Emit `inbound` (observability hook).
+   *   3. Match against the pending request map (cross-DID, by threadId /
+   *      parentThreadId). Pending matches resolve here.
+   *   4. Resolve the handler: per-DID registry first (if the inbound's
+   *      Channel has one), then the client-global registry (which falls
+   *      through to the catch-all registered via `handleAll`). Otherwise
+   *      → `NoHandler`.
+   *   5. Dispatch path forks on `channel.replyProtocol()`:
+   *      - **reply protocol on** — no auto-ack; `runHandlerWithReply`
+   *        emits `dispatch_reply` after the handler runs.
+   *      - **legacy** — auto-ack on the ORIGINATING Channel before
+   *        running the handler (`runHandler`).
+   */
+  private dispatchInbound(channel: Channel, payload: unknown): void {
     let msg: InternalMessage;
     try {
       msg = parseDIDComm(payload);
@@ -475,16 +703,10 @@ export class Layr8Client extends EventEmitter {
       return;
     }
 
-    // Observability hook before dispatch — observers see every parsed message
-    // regardless of how it gets routed. A throwing listener must NOT break
-    // dispatch (e.g. cause a pending request() to hang).
     this.safeEmit("inbound", msg);
 
-    // Check if this is a response to a pending Request (by thread ID).
-    // For most replies the responder reuses our thid → match by threadId.
-    // For DIDComm 2 problem-reports (and other corrective protocols) the
-    // responder typically sets pthid = our thid and starts a fresh thid
-    // for the report itself; match by parentThreadId in that case.
+    const useReplyProtocol = channel.replyProtocol();
+
     const matchKey =
       (msg.threadId && this.pending.has(msg.threadId)) ? msg.threadId :
       (msg.parentThreadId && this.pending.has(msg.parentThreadId)) ? msg.parentThreadId :
@@ -493,25 +715,25 @@ export class Layr8Client extends EventEmitter {
       const pending = this.pending.get(matchKey);
       if (pending) {
         this.pending.delete(matchKey);
-        // Send dispatch_reply so the node's PluginRouter doesn't time out
-        // Send dispatch_reply so the node's PluginRouter doesn't time out.
-        // Only when the node advertises reply_protocol — legacy nodes don't
-        // recognize the event and may drop the connection.
-        if (this.channel!.replyProtocol()) {
-          this.sendDispatchReply(msg.id, "handled");
+        // Reply protocol: tell the node we handled it so PluginRouter
+        // doesn't time out. Legacy nodes don't recognise the event so
+        // we only send it when the capability was negotiated.
+        if (useReplyProtocol) {
+          this.sendDispatchReply(channel, msg.id, "handled");
         }
         pending.resolve(msg);
         return;
       }
     }
 
-    const useReplyProtocol = this.channel!.replyProtocol();
-
-    // Route to registered handler
-    const entry = this.registry.lookup(msg.type);
+    // Per-DID first, then client-global (registry.lookup falls back to
+    // the catch-all registered via `handleAll`, if any).
+    const perDid = this.didHandlers.get(channel.did);
+    const entry =
+      (perDid && perDid.lookup(msg.type)) ?? this.registry.lookup(msg.type);
     if (!entry) {
       if (useReplyProtocol) {
-        this.sendDispatchReply(msg.id, "pass");
+        this.sendDispatchReply(channel, msg.id, "pass");
       }
       this.onError(new SDKError(ErrorKind.NoHandler, {
         messageId: msg.id,
@@ -522,30 +744,30 @@ export class Layr8Client extends EventEmitter {
     }
 
     if (useReplyProtocol) {
-      // New mode: no ack, use dispatch_reply after handler
-      this.runHandlerWithReply(entry.fn, msg);
+      // New mode: no ack, `runHandlerWithReply` emits dispatch_reply.
+      this.runHandlerWithReply(entry.fn, msg, channel);
     } else {
-      // Legacy mode: ack before handler
+      // Legacy mode: ack before handler.
       if (!entry.manualAck) {
         try {
-          this.channel!.sendAck([msg.id]);
-        } catch {
-          // Best-effort ack
-        }
+          channel.sendAck([msg.id]);
+        } catch { /* best-effort */ }
       } else {
         msg.ackFn = (id: string) => {
-          this.channel!.sendAck([id]);
+          channel.sendAck([id]);
         };
       }
-      this.runHandler(entry.fn, msg);
+      this.runHandler(entry.fn, msg, channel);
     }
   }
 
   private async runHandler(
     fn: HandlerFn,
     msg: InternalMessage,
+    channel: Channel,
   ): Promise<void> {
     let resp: Partial<Message> | null | undefined | typeof PASS;
+
     try {
       resp = await fn(msg);
     } catch (err) {
@@ -556,18 +778,26 @@ export class Layr8Client extends EventEmitter {
         from: msg.from,
         cause: error,
       }));
-      this.sendProblemReport(msg, error);
+      this.sendProblemReport(msg, error, channel);
       return;
     }
 
     if (resp && resp !== PASS) {
-      this.sendReplyMessage(resp as Partial<Message>, msg);
+      this.sendReplyMessage(resp as Partial<Message>, msg, channel);
     }
   }
 
+  /**
+   * Reply-protocol variant of `runHandler`. After the handler runs, emit
+   * a `dispatch_reply` with the outcome (handled / pass / error) so the
+   * cloud-node's PluginRouter can unblock — sent BEFORE any response
+   * message, since the router blocks during HTTP delivery on the
+   * server side and the dispatch_reply is what releases it.
+   */
   private async runHandlerWithReply(
     fn: HandlerFn,
     msg: InternalMessage,
+    channel: Channel,
   ): Promise<void> {
     let resp: Partial<Message> | null | undefined | typeof PASS;
     try {
@@ -580,28 +810,48 @@ export class Layr8Client extends EventEmitter {
         from: msg.from,
         cause: error,
       }));
-      this.sendDispatchReply(msg.id, "error", error.name, error.message);
+      this.sendDispatchReply(channel, msg.id, "error", error.name, error.message);
       return;
     }
 
     if (resp === PASS) {
-      this.sendDispatchReply(msg.id, "pass");
+      this.sendDispatchReply(channel, msg.id, "pass");
       return;
     }
 
-    // Send dispatch_reply BEFORE the response message. The node's channel
-    // processes WebSocket events sequentially; if the response targets a
-    // remote node, the channel blocks during HTTP delivery. Sending
-    // dispatch_reply first ensures the PluginRouter's receive unblocks
-    // before that blocking send.
-    this.sendDispatchReply(msg.id, "handled");
-
+    // dispatch_reply BEFORE the response message — see method comment.
+    this.sendDispatchReply(channel, msg.id, "handled");
     if (resp) {
-      this.sendReplyMessage(resp as Partial<Message>, msg);
+      this.sendReplyMessage(resp as Partial<Message>, msg, channel);
+    }
+  }
+
+  private sendReplyMessage(
+    resp: Partial<Message>,
+    original: InternalMessage,
+    channel: Channel,
+  ): void {
+    try {
+      const internal = this.fillMessageFrom(resp, channel.did);
+      if (!internal.to.length && original.from) {
+        internal.to = [original.from];
+      }
+      if (!internal.threadId) {
+        internal.threadId = original.threadId || original.id;
+      }
+      this.sendMessageOnChannel(internal, channel);
+    } catch (err) {
+      this.onError(new SDKError(ErrorKind.TransportWrite, {
+        messageId: original.id,
+        type: original.type,
+        from: original.from,
+        cause: toError(err),
+      }));
     }
   }
 
   private sendDispatchReply(
+    channel: Channel,
     messageId: string,
     status: string,
     code?: string,
@@ -611,19 +861,23 @@ export class Layr8Client extends EventEmitter {
       const payload: Record<string, string> = { message_id: messageId, status };
       if (code) payload.code = code;
       if (message) payload.message = message;
-      this.channel!.sendFireAndForget("dispatch_reply", payload);
+      channel.sendFireAndForget("dispatch_reply", payload);
     } catch {
-      // Best-effort
+      // Best-effort — see Channel.sendFireAndForget.
     }
   }
 
-  private sendProblemReport(original: InternalMessage, err: Error): void {
+  private sendProblemReport(
+    original: InternalMessage,
+    err: Error,
+    channel: Channel,
+  ): void {
     try {
       const threadId = original.threadId || original.id;
       const report: InternalMessage = {
         id: generateId(),
         type: "https://didcomm.org/report-problem/2.0/problem-report",
-        from: this.agentDid,
+        from: channel.did || this.agentDid,
         to: original.from ? [original.from] : [],
         threadId,
         parentThreadId: "",
@@ -632,18 +886,18 @@ export class Layr8Client extends EventEmitter {
           comment: err.message,
         },
       };
-      this.sendMessage(report);
+      this.sendMessageOnChannel(report, channel);
     } catch {
       // Best-effort: if we can't send the problem report (e.g., connection
       // lost), swallow the error to avoid masking the original handler failure.
     }
   }
 
-  private fillMessage(msg: Partial<Message>): InternalMessage {
+  private fillMessageFrom(msg: Partial<Message>, fromDid: string): InternalMessage {
     return {
       id: msg.id || generateId(),
       type: msg.type || "",
-      from: msg.from || this.agentDid,
+      from: msg.from || fromDid || this.agentDid,
       to: msg.to || [],
       threadId: msg.threadId || "",
       parentThreadId: msg.parentThreadId || "",
@@ -652,27 +906,9 @@ export class Layr8Client extends EventEmitter {
     };
   }
 
-  private async sendMessageAcked(msg: InternalMessage): Promise<void> {
-    if (!this.channel) throw new NotConnectedError();
+  private sendMessageOnChannel(msg: InternalMessage, channel: Channel): void {
     const data = marshalDIDComm(msg);
     this.safeEmit("outbound", msg);
-    const reply = await this.channel.send("message", JSON.parse(data));
-    if (reply.status === "error") {
-      throw new ServerRejectError(reply.reason || reply.status);
-    }
-  }
-
-  private sendMessageFireAndForget(msg: InternalMessage): void {
-    if (!this.channel) throw new NotConnectedError();
-    const data = marshalDIDComm(msg);
-    this.safeEmit("outbound", msg);
-    this.channel.sendFireAndForget("message", JSON.parse(data));
-  }
-
-  private sendMessage(msg: InternalMessage): void {
-    if (!this.channel) throw new NotConnectedError();
-    const data = marshalDIDComm(msg);
-    this.safeEmit("outbound", msg);
-    this.channel.sendFireAndForget("message", JSON.parse(data));
+    channel.sendFireAndForget("message", JSON.parse(data));
   }
 }
