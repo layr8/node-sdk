@@ -1,5 +1,10 @@
-export { Layr8Client } from "./client.js";
-export type { RequestOptions, SendOptions } from "./client.js";
+export { Layr8Client, DidHandle } from "./client.js";
+export type {
+  RequestOptions,
+  SendOptions,
+  JoinDidOptions,
+  JoinDidHandler,
+} from "./client.js";
 export type { Config, DidSpec, VerificationMethod } from "./config.js";
 export { DEFAULT_DID_SPEC } from "./config.js";
 export type {

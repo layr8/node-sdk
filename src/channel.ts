@@ -1,69 +1,21 @@
-import WebSocket from "ws";
-import { Backoff } from "./backoff.js";
+import { Connection, type ConnectionCallbacks, type ServerReply } from "./connection.js";
 import type { DidSpec } from "./config.js";
 import { DEFAULT_DID_SPEC } from "./config.js";
 import { ConnectionError, NotConnectedError } from "./errors.js";
 
-/**
- * Phoenix Channel V2 wire format: [join_ref, ref, topic, event, payload]
- */
-interface PhoenixMessage {
-  joinRef: string | null;
-  ref: string | null;
-  topic: string;
-  event: string;
-  payload: unknown;
-}
-
-function marshalPhoenixMsg(msg: PhoenixMessage): string {
-  return JSON.stringify([
-    msg.joinRef,
-    msg.ref,
-    msg.topic,
-    msg.event,
-    msg.payload,
-  ]);
-}
-
-function unmarshalPhoenixMsg(data: string): PhoenixMessage {
-  const arr = JSON.parse(data) as unknown[];
-  if (!Array.isArray(arr) || arr.length !== 5) {
-    throw new Error(`expected 5-element array, got ${Array.isArray(arr) ? arr.length : typeof arr}`);
-  }
-  return {
-    joinRef: (arr[0] as string) ?? null,
-    ref: (arr[1] as string) ?? null,
-    topic: arr[2] as string,
-    event: arr[3] as string,
-    payload: arr[4],
-  };
-}
-
-/** Returns true if host is "localhost" or a subdomain of it (RFC 6761). */
-function isLocalhost(host: string): boolean {
-  return host === "localhost" || host.endsWith(".localhost");
-}
+export type { ServerReply };
 
 /**
- * Rewrite a WebSocket URL so that *.localhost hostnames resolve to 127.0.0.1.
- * Returns [rewrittenUrl, hostHeader] — hostHeader is set when rewriting occurred.
+ * Lifecycle and inbound callbacks for one Channel.
+ *
+ * - `onMessage` — every inbound `message` event for this Channel's topic.
+ * - `onDisconnect` — fires when the underlying Connection drops (any
+ *   reason). Per-Channel notification; the Connection-level callback
+ *   (`ConnectionCallbacks.onDisconnect`) also fires once for the
+ *   whole socket.
+ * - `onReconnect` — fires after the Connection re-dials AND this Channel
+ *   has successfully re-joined.
  */
-function rewriteLocalhostUrl(wsUrl: string): [string, string | undefined] {
-  const parsed = new URL(wsUrl);
-  if (isLocalhost(parsed.hostname)) {
-    const hostHeader = parsed.host; // includes port if present
-    parsed.hostname = "127.0.0.1";
-    return [parsed.toString(), hostHeader];
-  }
-  return [wsUrl, undefined];
-}
-
-/** Server reply received for a tracked message ref. */
-export interface ServerReply {
-  status: string;
-  reason: string;
-}
-
 export interface ChannelCallbacks {
   onMessage: (payload: unknown) => void;
   onDisconnect?: (err: Error) => void;
@@ -71,142 +23,215 @@ export interface ChannelCallbacks {
 }
 
 /**
- * Phoenix Channel transport over WebSocket.
- * Implements the same protocol as the Go SDK's phoenixChannel.
+ * Channel — the per-topic half of the Phoenix Channel transport.
+ *
+ * One Channel = one joined `plugins:<did>` topic. Multiple Channels share a
+ * single Connection (and therefore a single WebSocket). The Connection
+ * owns the ref counter, pending-reply table, liveness timers, and
+ * reconnect loop; the Channel owns join state (joinRef, assignedDID),
+ * its topic, and the inbound callbacks for messages on it.
+ *
+ * Construction is inert — call `join(protocols)` to send the `phx_join`.
+ * Construction MUST register the Channel on the Connection (handled
+ * automatically by the constructor).
  */
-export class PhoenixChannel {
-  private ws: WebSocket | null = null;
-  private refCounter = 0;
-  private joinRef = "";
-  private readonly topic: string;
-  private callbacks: ChannelCallbacks;
-  private pendingJoinResolve: ((payload: unknown) => void) | null = null;
-  private closed = false;
-  private reconnecting = false;
-  private protocols: string[] = [];
-  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+export class Channel {
   /**
-   * Monotonic timestamp (Date.now()) of the most recently observed inbound
-   * frame — any message, pong, or phx_reply. Used by the Phoenix-level
-   * watchdog in startHeartbeat to detect "TCP healthy but Phoenix Channel
-   * GenServer hung" failures: when the heartbeat tick observes no frames
-   * for HEARTBEAT_MAX_SILENT_MS, it forces a close that the existing
-   * reconnect path picks up.
+   * The joined Phoenix topic, `plugins:<did>`. Mutable to support the
+   * auto-DID path: when the Channel is constructed with an empty DID
+   * (caller wants the node to assign one), the topic starts as
+   * `"plugins:"` and is rewritten in `joinImpl` once the join reply
+   * delivers `response.did`. The Connection's topic→Channel map is
+   * re-keyed in lockstep via `Connection.rekeyChannel`.
    */
-  private lastFrameAt = Date.now();
-  /**
-   * Timer that periodically emits a WS-level `{:ping, _}` frame. Independent
-   * of the Phoenix heartbeat — covers the TCP / NAT / LB half-dead case
-   * where the connection is unilaterally killed without a FIN.
-   */
-  private wsPingTimer: ReturnType<typeof setInterval> | null = null;
-  /**
-   * Timer armed each time we emit a WS ping. Cleared on any inbound frame
-   * (pong, message, phx_reply — anything proves liveness). If it fires we
-   * force-close the WS so the existing reconnect path takes over.
-   */
-  private pongWaitTimer: ReturnType<typeof setTimeout> | null = null;
-  private assignedDIDVal = "";
-  private readonly pendingRefs = new Map<string, {
-    resolve: (reply: ServerReply) => void;
-    reject: (err: Error) => void;
-    timer: ReturnType<typeof setTimeout>;
-  }>();
-
-  // Liveness detection constants. The Phoenix-level watchdog (HEARTBEAT_*)
-  // covers application-layer hangs; the WS-level ping/pong (WS_PING_* /
-  // PONG_WAIT_*) covers transport-layer hangs. Independent layers — both
-  // are needed because cowboy auto-pongs at the WS layer even when the
-  // Phoenix Channel GenServer has stopped processing.
-  //
-  // 75 000 ms = 2.5× heartbeat interval: tolerates one missed reply, trips
-  // on two consecutive misses.
-  private static readonly HEARTBEAT_INTERVAL_MS = 30_000;
-  private static readonly HEARTBEAT_MAX_SILENT_MS = 75_000;
-  private static readonly WS_PING_INTERVAL_MS = 25_000;
-  private static readonly WS_PONG_WAIT_MS = 35_000;
-
+  topic: string;
+  private readonly callbacks: ChannelCallbacks;
   private readonly didSpec: Required<DidSpec>;
 
+  private joinRef = "";
+  private assignedDIDVal = "";
+  private protocols: string[] = [];
+  private joined = false;
+  private left = false;
+
   constructor(
-    private readonly wsUrl: string,
-    private readonly apiKey: string,
-    agentDid: string,
+    private readonly connection: Connection,
+    did: string,
     callbacks: ChannelCallbacks,
     didSpec?: DidSpec,
   ) {
-    this.topic = `plugins:${agentDid}`;
+    this.topic = `plugins:${did}`;
     this.callbacks = callbacks;
-    this.didSpec = { ...DEFAULT_DID_SPEC, ...didSpec, verificationMethods: didSpec?.verificationMethods ?? DEFAULT_DID_SPEC.verificationMethods };
-  }
-
-  async connect(protocols: string[], signal?: AbortSignal): Promise<void> {
-    this.protocols = protocols;
-    return this.dial(signal);
-  }
-
-  private async dial(signal?: AbortSignal): Promise<void> {
-    this.refCounter = 0;
-
-    const parsed = new URL(this.wsUrl);
-    parsed.searchParams.set("api_key", this.apiKey);
-    parsed.searchParams.set("vsn", "2.0.0");
-
-    const [url, hostHeader] = rewriteLocalhostUrl(parsed.toString());
-
-    const wsOpts: WebSocket.ClientOptions = {
-      handshakeTimeout: 10_000,
+    this.didSpec = {
+      ...DEFAULT_DID_SPEC,
+      ...didSpec,
+      verificationMethods:
+        didSpec?.verificationMethods ?? DEFAULT_DID_SPEC.verificationMethods,
     };
-    if (hostHeader) {
-      wsOpts.headers = { Host: hostHeader };
+    connection.registerChannel(this);
+  }
+
+  /**
+   * Send `phx_join` for this Channel's topic and wait for the reply.
+   * Stores `protocols` so the Connection's reconnect loop can rejoin
+   * automatically.
+   */
+  async join(protocols: string[], signal?: AbortSignal): Promise<void> {
+    this.protocols = protocols;
+    await this.joinImpl(signal);
+    this.joined = true;
+  }
+
+  /**
+   * Re-send `phx_join` after the Connection has re-dialed. Called by
+   * `Connection.reconnectLoop`. The Channel keeps the original protocols
+   * + didSpec from the original `join()` so no caller state is needed.
+   */
+  async rejoin(): Promise<void> {
+    if (this.left) return;
+    await this.joinImpl();
+    this.joined = true;
+  }
+
+  /**
+   * Send `phx_leave` (best-effort) and unregister from the Connection.
+   * The Connection itself stays open — use `Connection.close()` to tear
+   * down the WebSocket.
+   */
+  leave(): void {
+    if (this.left) return;
+    this.left = true;
+    this.joined = false;
+
+    try {
+      this.connection.writeMsg({
+        joinRef: null,
+        ref: this.connection.nextRef(),
+        topic: this.topic,
+        event: "phx_leave",
+        payload: {},
+      });
+    } catch {
+      // ignore — Connection may be mid-reconnect
     }
 
-    return new Promise<void>((resolve, reject) => {
-      if (signal?.aborted) {
-        reject(signal.reason ?? new Error("aborted"));
-        return;
-      }
+    this.connection.unregisterChannel(this.topic);
+  }
 
-      const ws = new WebSocket(url, wsOpts);
-
-      const onAbort = () => {
-        ws.close();
-        reject(signal!.reason ?? new Error("aborted"));
-      };
-      signal?.addEventListener("abort", onAbort, { once: true });
-
-      ws.on("error", (err) => {
-        signal?.removeEventListener("abort", onAbort);
-        reject(new ConnectionError(this.wsUrl, (err as Error).message));
+  /**
+   * Tracked send: returns a promise that resolves on the matching
+   * `phx_reply`. The promise rejects on a 15-second reply timeout, on
+   * disconnect, or on Connection close.
+   */
+  async send(event: string, payload: unknown): Promise<ServerReply> {
+    if (!this.connection.isConnected() || !this.joined) {
+      // `!this.joined` catches the post-reconnect window where the WS is up
+      // (Connection.isConnected()=true) but this specific Channel failed
+      // to rejoin (cloud-node has no subscription for this topic). Without
+      // it the write would land on the wire but be silently dropped.
+      throw new NotConnectedError();
+    }
+    const ref = this.connection.nextRef();
+    const replyPromise = this.connection.trackPendingRef(ref);
+    try {
+      this.connection.writeMsg({
+        joinRef: null,
+        ref,
+        topic: this.topic,
+        event,
+        payload,
       });
+    } catch (err) {
+      // The pendingRef will time out on its own, but throwing eagerly
+      // is the desired user-facing behavior. The next phx_reply for this
+      // ref (if any) would no-op since the map entry is gone.
+      throw err;
+    }
+    const raw = await replyPromise;
+    return normaliseServerReply(raw);
+  }
 
-      ws.on("open", async () => {
-        signal?.removeEventListener("abort", onAbort);
-        this.ws = ws;
-        // Reset the watchdog clock so the first heartbeat tick after
-        // (re)connect measures silence from "just now", not from before
-        // the disconnect.
-        this.lastFrameAt = Date.now();
-        this.setupReadLoop();
-        this.startHeartbeat();
-        this.startWsPingLoop();
-
-        try {
-          await this.join(this.protocols, signal);
-          resolve();
-        } catch (err) {
-          ws.close();
-          reject(err);
-        }
-      });
+  /** Fire-and-forget send: writes the frame, returns synchronously. */
+  sendFireAndForget(event: string, payload: unknown): void {
+    if (!this.connection.isConnected() || !this.joined) {
+      // See `send` — joined-but-disconnected and reconnected-but-rejoin-
+      // failed are both NotConnectedError from the caller's perspective.
+      throw new NotConnectedError();
+    }
+    this.connection.writeMsg({
+      joinRef: null,
+      ref: this.connection.nextRef(),
+      topic: this.topic,
+      event,
+      payload,
     });
   }
 
-  private async join(
-    protocols: string[],
-    signal?: AbortSignal,
-  ): Promise<void> {
-    const ref = this.nextRef();
+  /** Ack inbound message ids (fire-and-forget). */
+  sendAck(ids: string[]): void {
+    this.sendFireAndForget("ack", { ids });
+  }
+
+  /** DID assigned by the node when this Channel joined. "" until join replies. */
+  assignedDID(): string {
+    return this.assignedDIDVal;
+  }
+
+  /** True once `join()` has resolved successfully. */
+  isJoined(): boolean {
+    return this.joined && !this.left;
+  }
+
+  /**
+   * The DID this Channel hosts — extracted from `topic` (`plugins:<did>`).
+   * For auto-DID Channels this is the empty string before `join()` and the
+   * server-assigned DID after.
+   */
+  get did(): string {
+    return this.topic.startsWith("plugins:") ? this.topic.slice("plugins:".length) : "";
+  }
+
+  // ── Connection-side hooks (called by Connection's read loop / lifecycle) ─
+
+  /** Inbound `message` for this Channel's topic. */
+  onMessage(payload: unknown): void {
+    this.callbacks.onMessage(payload);
+  }
+
+  /** `phx_error` or `phx_close` for this Channel's topic. */
+  onChannelTeardown(err: Error): void {
+    this.callbacks.onDisconnect?.(err);
+  }
+
+  /** The Connection's WS dropped unexpectedly. */
+  onUnexpectedDisconnect(err: Error): void {
+    this.joined = false;
+    this.callbacks.onDisconnect?.(err);
+  }
+
+  /** The Connection has re-dialed and this Channel was successfully rejoined. */
+  onReconnect(): void {
+    this.callbacks.onReconnect?.();
+  }
+
+  /** The Connection is being torn down — clean up per-Channel state. */
+  onConnectionClose(): void {
+    this.left = true;
+    this.joined = false;
+  }
+
+  // ── internals ────────────────────────────────────────────────────────
+
+  /**
+   * Build the `phx_join` payload and write it, returning when the matching
+   * `phx_reply` arrives via the Connection's `pendingRefs` table.
+   *
+   * On a non-"ok" status the promise rejects with `ConnectionError`. On a
+   * successful reply the Channel records `assignedDID` (if the node
+   * supplied one) and stores `joinRef` for outbound frame correlation.
+   */
+  private async joinImpl(signal?: AbortSignal): Promise<void> {
+    const ref = this.connection.nextRef();
     this.joinRef = ref;
 
     const spec = this.didSpec;
@@ -221,370 +246,165 @@ export class PhoenixChannel {
     }
 
     const joinPayload = {
-      payload_types: protocols,
+      payload_types: this.protocols,
       did_spec: didSpecPayload,
     };
 
-    return new Promise<void>((resolve, reject) => {
-      if (signal?.aborted) {
-        reject(signal.reason ?? new Error("aborted"));
-        return;
-      }
+    if (signal?.aborted) {
+      throw signal.reason ?? new Error("aborted");
+    }
 
-      const onAbort = () => {
-        this.pendingJoinResolve = null;
-        reject(signal!.reason ?? new Error("aborted"));
+    const replyPromise = this.connection.trackPendingRef(ref);
+
+    let onAbort: (() => void) | undefined;
+    if (signal) {
+      onAbort = () => {
+        // The pending entry will resolve on its own when (and if) a reply
+        // eventually arrives — set up a no-op consumer in that case.
+        replyPromise.catch(() => undefined);
       };
-      signal?.addEventListener("abort", onAbort, { once: true });
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
 
-      this.pendingJoinResolve = (payload: unknown) => {
-        signal?.removeEventListener("abort", onAbort);
-        const reply = payload as {
-          status: string;
-          response?: { did?: string; reason?: string };
-        };
-        if (reply.status !== "ok") {
-          const reason = reply.response?.reason ?? `join rejected: ${reply.status}`;
-          reject(new ConnectionError(this.wsUrl, reason));
-          return;
-        }
-        if (reply.response?.did) {
-          this.assignedDIDVal = reply.response.did;
-        }
-        resolve();
-      };
-
-      this.writeMsg({
+    try {
+      this.connection.writeMsg({
         joinRef: ref,
         ref,
         topic: this.topic,
         event: "phx_join",
         payload: joinPayload,
       });
-    });
+    } catch (err) {
+      if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+      throw err;
+    }
+
+    let rawReply: unknown;
+    try {
+      rawReply = await replyPromise;
+    } finally {
+      if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+    }
+
+    if (signal?.aborted) {
+      throw signal.reason ?? new Error("aborted");
+    }
+
+    const reply = rawReply as {
+      status?: string;
+      response?: { did?: string; reason?: string };
+    };
+    if (reply.status !== "ok") {
+      const reason =
+        reply.response?.reason ?? `join rejected: ${reply.status ?? "unknown"}`;
+      throw new ConnectionError(this.topic, reason);
+    }
+    if (reply.response?.did) {
+      this.assignedDIDVal = reply.response.did;
+      // Auto-DID path: only when the Channel was constructed with an
+      // empty DID (placeholder topic `"plugins:"`) do we adopt the
+      // server-assigned DID as the topic. When the caller supplied a
+      // DID up-front, the server-returned `response.did` is informational
+      // only (it may not equal what we sent — e.g. test mocks return a
+      // fixed string regardless), and we keep our own topic.
+      if (this.topic === "plugins:") {
+        const newTopic = `plugins:${reply.response.did}`;
+        this.connection.rekeyChannel(this.topic, newTopic);
+        this.topic = newTopic;
+      }
+    }
+  }
+}
+
+/** Normalise a raw phx_reply payload to ServerReply. */
+function normaliseServerReply(raw: unknown): ServerReply {
+  const r = (raw ?? {}) as {
+    status?: string;
+    response?: { reason?: string };
+  };
+  return {
+    status: r.status ?? "",
+    reason: r.response?.reason ?? "",
+  };
+}
+
+/**
+ * @deprecated Use `Connection` + `Channel` directly. This facade is kept
+ * only so the existing `tests/channel.test.ts` integration tests (which
+ * exercise the single-DID surface end-to-end against a real
+ * WebSocketServer mock) continue to pass without modification while the
+ * multi-channel refactor lands. Slated for removal in a follow-up PR
+ * once those tests are re-targeted to the new shape.
+ */
+export class PhoenixChannel {
+  private readonly connection: Connection;
+  private channel: Channel | null = null;
+
+  private readonly callbacks: ChannelCallbacks;
+  private readonly didSpec?: DidSpec;
+  private readonly agentDid: string;
+
+  constructor(
+    wsUrl: string,
+    apiKey: string,
+    agentDid: string,
+    callbacks: ChannelCallbacks,
+    didSpec?: DidSpec,
+  ) {
+    this.agentDid = agentDid;
+    this.callbacks = callbacks;
+    this.didSpec = didSpec;
+    const connCallbacks: ConnectionCallbacks = {};
+    if (callbacks.onDisconnect) connCallbacks.onDisconnect = callbacks.onDisconnect;
+    if (callbacks.onReconnect) connCallbacks.onReconnect = callbacks.onReconnect;
+    this.connection = new Connection(wsUrl, apiKey, connCallbacks);
+  }
+
+  async connect(protocols: string[], signal?: AbortSignal): Promise<void> {
+    await this.connection.dial(signal);
+    this.channel = new Channel(
+      this.connection,
+      this.agentDid,
+      // The Connection already calls its own `onDisconnect` /`onReconnect`,
+      // so don't double-fire from the inner Channel — only forward
+      // `onMessage` for the topic.
+      { onMessage: this.callbacks.onMessage },
+      this.didSpec,
+    );
+    try {
+      await this.channel.join(protocols, signal);
+    } catch (err) {
+      // Single-DID facade: a failed join means the whole connect() failed.
+      // Tear the Connection down so the caller (and the server) see a
+      // closed WS — otherwise an afterEach hung on server.close() waiting
+      // for the client to disconnect.
+      this.connection.close();
+      this.channel = null;
+      throw err;
+    }
   }
 
   send(event: string, payload: unknown): Promise<ServerReply> {
-    if (this.reconnecting) {
-      return Promise.reject(new NotConnectedError());
-    }
-    const ref = this.nextRef();
-
-    return new Promise<ServerReply>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        const pending = this.pendingRefs.get(ref);
-        if (pending) {
-          this.pendingRefs.delete(ref);
-          reject(new Error("server reply timeout"));
-        }
-      }, 15_000); // 15 second timeout for server reply
-
-      this.pendingRefs.set(ref, {
-        resolve: (reply) => {
-          clearTimeout(timer);
-          this.pendingRefs.delete(ref);
-          resolve(reply);
-        },
-        reject: (err) => {
-          clearTimeout(timer);
-          this.pendingRefs.delete(ref);
-          reject(err);
-        },
-        timer,
-      });
-
-      try {
-        this.writeMsg({
-          joinRef: null,
-          ref,
-          topic: this.topic,
-          event,
-          payload,
-        });
-      } catch (err) {
-        clearTimeout(timer);
-        this.pendingRefs.delete(ref);
-        reject(err);
-      }
-    });
+    if (!this.channel) return Promise.reject(new NotConnectedError());
+    return this.channel.send(event, payload);
   }
 
   sendFireAndForget(event: string, payload: unknown): void {
-    if (this.reconnecting) {
-      throw new NotConnectedError();
-    }
-    this.writeMsg({
-      joinRef: null,
-      ref: this.nextRef(),
-      topic: this.topic,
-      event,
-      payload,
-    });
+    if (!this.channel) throw new NotConnectedError();
+    this.channel.sendFireAndForget(event, payload);
   }
 
   sendAck(ids: string[]): void {
-    this.sendFireAndForget("ack", { ids });
+    if (!this.channel) throw new NotConnectedError();
+    this.channel.sendAck(ids);
   }
 
   assignedDID(): string {
-    return this.assignedDIDVal;
+    return this.channel?.assignedDID() ?? "";
   }
 
   close(): void {
-    if (this.closed) return;
-    this.closed = true;
-    this.reconnecting = false;
-
-    this.stopLivenessTimers();
-
-    // Reject all pending refs
-    for (const [, pending] of this.pendingRefs) {
-      clearTimeout(pending.timer);
-      pending.reject(new Error("channel closed"));
-    }
-    this.pendingRefs.clear();
-
-    if (this.ws) {
-      // Send phx_leave before closing
-      try {
-        this.writeMsg({
-          joinRef: null,
-          ref: this.nextRef(),
-          topic: this.topic,
-          event: "phx_leave",
-          payload: {},
-        });
-      } catch {
-        // ignore write errors during close
-      }
-      this.ws.close();
-      this.ws = null;
-    }
-  }
-
-  private setupReadLoop(): void {
-    if (!this.ws) return;
-
-    this.ws.on("message", (data) => {
-      // Any inbound frame proves the connection is alive end-to-end —
-      // disarm both watchdogs before dispatch. Heartbeat ack, message
-      // event, phx_reply, phx_error, all count.
-      this.lastFrameAt = Date.now();
-      this.disarmPongWait();
-      try {
-        const msg = unmarshalPhoenixMsg(data.toString());
-        this.handleInbound(msg);
-      } catch {
-        // Phoenix wire format parse failure — not a DIDComm error.
-        // Transport-level noise (e.g., truncated frames), matches Go SDK behavior.
-      }
-    });
-
-    // WS-level pong arrival in response to our ping (or unsolicited).
-    // Either way, the transport is alive — clear pong_wait. We also
-    // bump lastFrameAt for the Phoenix-level watchdog, since a pong
-    // round-trip proves cowboy + TCP are healthy.
-    this.ws.on("pong", () => {
-      this.lastFrameAt = Date.now();
-      this.disarmPongWait();
-    });
-
-    this.ws.on("close", () => {
-      if (!this.closed) {
-        this.rejectPendingRefs();
-        if (this.callbacks.onDisconnect) {
-          this.callbacks.onDisconnect(new Error("WebSocket closed"));
-        }
-        this.reconnectLoop();
-      }
-    });
-
-    this.ws.on("error", (err) => {
-      if (!this.closed) {
-        this.rejectPendingRefs();
-        if (this.callbacks.onDisconnect) {
-          this.callbacks.onDisconnect(err as Error);
-        }
-        this.reconnectLoop();
-      }
-    });
-  }
-
-  private handleInbound(msg: PhoenixMessage): void {
-    switch (msg.event) {
-      case "phx_reply":
-        // Join reply
-        if (this.pendingJoinResolve && msg.ref === this.joinRef) {
-          const resolve = this.pendingJoinResolve;
-          this.pendingJoinResolve = null;
-          resolve(msg.payload);
-          return;
-        }
-
-        // Message send reply (ref tracking)
-        if (msg.ref) {
-          const pending = this.pendingRefs.get(msg.ref);
-          if (pending) {
-            const reply = msg.payload as { status?: string; response?: { reason?: string } };
-            pending.resolve({
-              status: reply?.status ?? "",
-              reason: reply?.response?.reason ?? "",
-            });
-          }
-        }
-        break;
-      case "message":
-        this.callbacks.onMessage(msg.payload);
-        break;
-      case "phx_error":
-      case "phx_close":
-        if (this.callbacks.onDisconnect) {
-          this.callbacks.onDisconnect(new Error(`channel ${msg.event}`));
-        }
-        break;
-    }
-  }
-
-  private startHeartbeat(): void {
-    this.heartbeatTimer = setInterval(() => {
-      if (this.closed || !this.ws) return;
-
-      const silentMs = Date.now() - this.lastFrameAt;
-      if (silentMs > PhoenixChannel.HEARTBEAT_MAX_SILENT_MS) {
-        // Application-layer hang: cloud-node's Phoenix Channel GenServer
-        // is no longer responding (we'd have seen heartbeat acks or
-        // other frames by now). Terminate the socket and let the
-        // existing reconnect path take over.
-        try {
-          this.ws.terminate();
-        } catch {
-          // ignore
-        }
-        return;
-      }
-
-      try {
-        this.writeMsg({
-          joinRef: null,
-          ref: this.nextRef(),
-          topic: "phoenix",
-          event: "heartbeat",
-          payload: {},
-        });
-      } catch {
-        // heartbeat write failed — connection likely dead
-      }
-    }, PhoenixChannel.HEARTBEAT_INTERVAL_MS);
-  }
-
-  /**
-   * WS-level ping every WS_PING_INTERVAL_MS. Cowboy (Phoenix's HTTP/WS
-   * server) auto-pongs at the protocol layer — even if the application
-   * Channel is hung. When the underlying TCP / NAT / LB has silently
-   * dropped the connection, ping write may succeed locally but no pong
-   * comes back; pongWaitTimer fires and we force-close.
-   */
-  private startWsPingLoop(): void {
-    this.wsPingTimer = setInterval(() => {
-      if (this.closed || !this.ws) return;
-      try {
-        this.ws.ping();
-        this.armPongWait();
-      } catch {
-        // ping write failed — connection likely dead; let
-        // ws.on("error") path handle it
-      }
-    }, PhoenixChannel.WS_PING_INTERVAL_MS);
-  }
-
-  private armPongWait(): void {
-    if (this.pongWaitTimer) {
-      clearTimeout(this.pongWaitTimer);
-    }
-    this.pongWaitTimer = setTimeout(() => {
-      this.pongWaitTimer = null;
-      if (this.closed || !this.ws) return;
-      // No pong (or any frame) within WS_PONG_WAIT_MS of the last ping —
-      // transport is dead. Terminate; reconnect path takes over.
-      try {
-        this.ws.terminate();
-      } catch {
-        // ignore
-      }
-    }, PhoenixChannel.WS_PONG_WAIT_MS);
-  }
-
-  private disarmPongWait(): void {
-    if (this.pongWaitTimer) {
-      clearTimeout(this.pongWaitTimer);
-      this.pongWaitTimer = null;
-    }
-  }
-
-  private stopLivenessTimers(): void {
-    if (this.heartbeatTimer) {
-      clearInterval(this.heartbeatTimer);
-      this.heartbeatTimer = null;
-    }
-    if (this.wsPingTimer) {
-      clearInterval(this.wsPingTimer);
-      this.wsPingTimer = null;
-    }
-    this.disarmPongWait();
-  }
-
-  private async reconnectLoop(): Promise<void> {
-    if (this.reconnecting) return;
-    this.reconnecting = true;
-
-    // Close existing ws
-    if (this.ws) {
-      this.ws.removeAllListeners();
-      this.ws.close();
-      this.ws = null;
-    }
-
-    // Stop all liveness timers — dial() will re-arm them after the new
-    // socket opens.
-    this.stopLivenessTimers();
-
-    const bo = new Backoff(1000, 30000);
-
-    while (!this.closed) {
-      const delay = bo.next();
-      await new Promise(resolve => setTimeout(resolve, delay));
-      if (this.closed) return;
-
-      try {
-        await this.dial();
-        this.reconnecting = false;
-        if (this.callbacks.onReconnect) {
-          this.callbacks.onReconnect();
-        }
-        return;
-      } catch {
-        // will retry
-      }
-    }
-  }
-
-  private rejectPendingRefs(): void {
-    for (const [, pending] of this.pendingRefs) {
-      clearTimeout(pending.timer);
-      pending.reject(new Error("disconnected"));
-    }
-    this.pendingRefs.clear();
-  }
-
-  private nextRef(): string {
-    this.refCounter++;
-    return String(this.refCounter);
-  }
-
-  private writeMsg(msg: PhoenixMessage): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      throw new NotConnectedError();
-    }
-    this.ws.send(marshalPhoenixMsg(msg));
+    this.connection.close();
+    this.channel = null;
   }
 }

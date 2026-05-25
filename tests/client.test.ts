@@ -412,7 +412,7 @@ describe("Layr8Client", () => {
 
     await client.connect();
 
-    server.sendToClient(null, null, "plugin:lobby", "message", {
+    server.sendToClient(null, null, "plugins:did:web:alice", "message", {
       context: {
         recipient: "did:web:alice",
         authorized: true,
@@ -469,7 +469,7 @@ describe("Layr8Client", () => {
 
     await client.connect();
 
-    server.sendToClient(null, null, "plugin:lobby", "message", {
+    server.sendToClient(null, null, "plugins:did:web:alice", "message", {
       plaintext: {
         id: "req-1",
         type: "https://layr8.io/protocols/echo/1.0/request",
@@ -519,7 +519,7 @@ describe("Layr8Client", () => {
 
     await client.connect();
 
-    server.sendToClient(null, null, "plugin:lobby", "message", {
+    server.sendToClient(null, null, "plugins:did:web:alice", "message", {
       plaintext: {
         id: "req-1",
         type: "https://layr8.io/protocols/echo/1.0/request",
@@ -662,7 +662,7 @@ describe("Layr8Client", () => {
     await client.connect();
 
     // Send garbage that can't be parsed as DIDComm
-    server.sendToClient(null, null, "plugin:lobby", "message", "not-a-didcomm-message");
+    server.sendToClient(null, null, "plugins:did:web:test", "message", "not-a-didcomm-message");
     await delay(200);
 
     expect(errors.length).toBeGreaterThan(0);
@@ -677,7 +677,7 @@ describe("Layr8Client", () => {
     client.handle("https://layr8.io/protocols/echo/1.0/request", async () => null);
     await client.connect();
 
-    server.sendToClient(null, null, "plugin:lobby", "message", {
+    server.sendToClient(null, null, "plugins:did:web:test", "message", {
       plaintext: {
         id: "msg-1",
         type: "https://unknown.org/protocol/1.0/unknown",
@@ -699,7 +699,7 @@ describe("Layr8Client", () => {
     client.handle("https://layr8.io/protocols/echo/1.0/request", async () => { throw new Error("boom"); });
     await client.connect();
 
-    server.sendToClient(null, null, "plugin:lobby", "message", {
+    server.sendToClient(null, null, "plugins:did:web:alice", "message", {
       plaintext: { id: "req-1", type: "https://layr8.io/protocols/echo/1.0/request", from: "did:web:bob", body: {} },
     });
     await delay(500);
