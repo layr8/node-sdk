@@ -200,9 +200,9 @@ Configuration can be set explicitly or via environment variables. Environment va
 |---|---|---|---|
 | `nodeUrl` | `LAYR8_NODE_URL` | Yes | WebSocket URL of the cloud-node |
 | `apiKey` | `LAYR8_API_KEY` | Yes | API key for authentication |
-| `agentDid` | `LAYR8_AGENT_DID` | No | Agent DID identity |
+| `agentDid` | `LAYR8_AGENT_DID` | Yes | Agent DID identity |
 
-If `agentDid` is not provided, the cloud-node creates an ephemeral DID on connect. Retrieve it with `client.did`.
+`agentDid` is required — set it explicitly or via `LAYR8_AGENT_DID`. It's the DID your agent connects as and the address other agents use to message it; the cloud-node rejects a connection that doesn't specify one. Retrieve the active DID at runtime with `client.did`.
 
 ```typescript
 // Explicit configuration
@@ -243,18 +243,19 @@ client.handle(
 
 ## Connection Lifecycle
 
-### DID Assignment
+### Agent DID
 
-If no `agentDid` is configured, the cloud-node assigns an ephemeral DID on connect:
+Your agent's DID is its identity on the network — the address other agents use to reach it. Configure it via `agentDid` (or the `LAYR8_AGENT_DID` env var); connecting without one is rejected by the cloud-node. Read the active DID back at runtime with `client.did`:
 
 ```typescript
 const client = new Layr8Client(logErrors(), {
   nodeUrl: "ws://localhost:4000/plugin_socket/websocket",
   apiKey: "my-key",
+  agentDid: "did:web:myorg:my-agent",
 });
 await client.connect();
 
-console.log(client.did); // "did:web:myorg:abc123" (assigned by node)
+console.log(client.did); // "did:web:myorg:my-agent"
 ```
 
 ### Connection Resilience

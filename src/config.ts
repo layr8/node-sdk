@@ -48,7 +48,7 @@ export interface Config {
   nodeUrl?: string;
   /** Authentication key for the cloud-node. Fallback: LAYR8_API_KEY env. */
   apiKey?: string;
-  /** DID identity of this agent. If empty, an ephemeral DID is created on connect(). Fallback: LAYR8_AGENT_DID env. */
+  /** DID identity of this agent — the address other agents use to message it. Required: the cloud-node rejects a connection without a DID. Fallback: LAYR8_AGENT_DID env. */
   agentDid?: string;
   /** DID specification for the cloud-node join handshake. Merged with defaults. */
   didSpec?: DidSpec;
