@@ -192,6 +192,39 @@ interface RequestOptions {
 }
 ```
 
+### MCP (Model Context Protocol) over DIDComm
+
+Some Layr8 services expose an [MCP](https://modelcontextprotocol.io/) surface as
+DIDComm request/reply: a request of type `${base}/<method>` carrying a JSON-RPC
+2.0 body, answered by a `${base}/<method>-result` message. `client.mcp()` wraps
+that pattern — the `${base}/…` type, the JSON-RPC envelope, unwrapping `result`,
+and the protocol subscription — on top of `request()` (which correlates the
+reply by its echoed `thread_id`).
+
+```typescript
+const client = new Layr8Client(logErrors(), { nodeUrl, apiKey, agentDid });
+
+// Call mcp() BEFORE connect() (like handle()) — it registers the protocol
+// subscription the node needs to deliver replies.
+const mcp = client.mcp(); // default base: https://layr8.io/protocols/mcp/1.0
+await client.connect();
+
+const peer = mcp.peer("did:web:other-org:some-service");
+await peer.initialize();
+const tools = await peer.listTools();                       // → [{ name, ... }]
+const result = await peer.callTool("create_workflow", {     // MCP tools/call
+  name: "wf",
+  steps: [/* … */],
+});
+// low-level: any method, returns the JSON-RPC `result` (throws McpError on error)
+await peer.call("tools/call", { name: "…", arguments: { /* … */ } });
+```
+
+`mcp(base?)` returns an `McpBinding`; `binding.peer(did)` returns an `McpPeer`
+(`.call` / `.callTool` / `.listTools` / `.initialize`). A JSON-RPC `error`
+reply throws `McpError` (`.code`, `.message`, `.data`). `mcp()` must be called
+before `connect()` and is idempotent per base.
+
 ## Configuration
 
 Configuration can be set explicitly or via environment variables. Environment variables are used as fallbacks when the corresponding field is empty or undefined.

@@ -5,6 +5,11 @@ export type {
   JoinDidOptions,
   JoinDidHandler,
 } from "./client.js";
+
+// MCP (Model Context Protocol) over DIDComm
+export { McpBinding, McpPeer, McpError, DEFAULT_MCP_BASE } from "./mcp.js";
+export type { McpCallOptions } from "./mcp.js";
+
 export type { Config, DidSpec, VerificationMethod } from "./config.js";
 export { DEFAULT_DID_SPEC } from "./config.js";
 export type {

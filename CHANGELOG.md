@@ -4,6 +4,24 @@ All notable changes to `@layr8/sdk`. Format loosely follows [Keep a Changelog](h
 
 This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git history.
 
+## [Unreleased]
+
+### Added
+
+- **MCP (Model Context Protocol) over DIDComm** — `Layr8Client.mcp(base?)`. A
+  growing set of Layr8 services (Loom is the first) expose an MCP surface as
+  DIDComm request/reply: a request of type `${base}/<method>` carrying a
+  JSON-RPC 2.0 body, answered by a `${base}/<method>-result` message. The reply
+  echoes the request `thread_id`, so `request()` already correlates it; `mcp()`
+  removes the boilerplate. Call it BEFORE `connect()` (like `handle()`) — it
+  registers the protocol subscription the node needs to deliver `${base}/*`
+  replies. `mcp().peer(did)` returns an `McpPeer` with `.call(method, params)`
+  (returns the JSON-RPC `result`, throws `McpError` on a JSON-RPC `error`) plus
+  `.callTool(name, args)`, `.listTools()`, and `.initialize()` conveniences.
+  Exposes `McpBinding`, `McpPeer`, `McpError`, and `DEFAULT_MCP_BASE`.
+  Previously every consumer hand-rolled a `send` + result-type-handler +
+  body-id-correlation client to talk to these services; now it is two lines.
+
 ## [0.2.0] - 2026-05-25
 
 ### Added

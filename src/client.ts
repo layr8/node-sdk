@@ -37,6 +37,7 @@ import {
 import { Connection } from "./connection.js";
 import { Channel } from "./channel.js";
 import { RestClient, restUrlFromWebSocket } from "./rest.js";
+import { McpBinding, DEFAULT_MCP_BASE } from "./mcp.js";
 
 function toError(err: unknown): Error {
   return err instanceof Error ? err : new Error(String(err));
@@ -159,6 +160,9 @@ export class Layr8Client extends EventEmitter {
     { resolve: (msg: InternalMessage) => void; reject: (err: Error) => void }
   >();
 
+  /** MCP protocol bases already subscribed via `mcp()` (idempotency guard). */
+  private readonly mcpBases = new Set<string>();
+
   constructor(onError: ErrorHandler, cfg: Config = {}) {
     super();
     if (typeof onError !== "function") {
@@ -215,6 +219,35 @@ export class Layr8Client extends EventEmitter {
       throw new AlreadyConnectedError();
     }
     this.registry.registerCatchAll(fn, opts);
+  }
+
+  /**
+   * Set up MCP (Model Context Protocol) over DIDComm on a protocol `base` and
+   * return a binding whose `peer(did)` yields a `.call(method, params)` caller.
+   *
+   * A peer's MCP surface is DIDComm request/reply: a request of type
+   * `${base}/<method>` with a JSON-RPC body, answered by a
+   * `${base}/<method>-result` message. The reply echoes the request's
+   * `thread_id`, so `request()` correlates it — this binding removes the
+   * boilerplate (the type, the JSON-RPC envelope, unwrapping `result`).
+   *
+   * Must be called BEFORE `connect()` (like `handle()`): it registers the
+   * protocol subscription the cloud-node needs to deliver `${base}/*` replies.
+   * Idempotent per base. Compose freely with your own `handle()` registrations.
+   */
+  mcp(base: string = DEFAULT_MCP_BASE): McpBinding {
+    if (this.connected) throw new AlreadyConnectedError();
+    if (this.isClosed) throw new ClientClosedError();
+    if (!this.mcpBases.has(base)) {
+      // A no-op handler whose type derives the `base` protocol subscribes the
+      // client to it (see HandlerRegistry.protocols/deriveProtocol). request()
+      // consumes correlated replies in dispatchInbound BEFORE handler lookup,
+      // so this handler only ever fires for an *uncorrelated* `${base}/…`
+      // message (none in normal request/reply use) — PASS is the safe default.
+      this.registry.register(`${base}/_mcp`, () => PASS);
+      this.mcpBases.add(base);
+    }
+    return new McpBinding(this, base);
   }
 
   /**
