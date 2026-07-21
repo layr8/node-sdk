@@ -6,18 +6,47 @@ Pushing a git tag does **not** publish anything. The release workflow triggers o
 `release: published`, so you must create a GitHub Release.
 
 ```bash
-# 1. from an up-to-date main, bump the version and write the changelog
-npm version 0.2.1 --no-git-tag-version
-$EDITOR CHANGELOG.md
-git commit -am "Bump version to 0.2.1"
-git push origin main
+# 0. start from an up-to-date main
+git checkout main && git pull
 
-# 2. cut the release (this creates the tag and triggers publishing)
-gh release create v0.2.1 --title "v0.2.1 — <short summary>" --notes "<release notes>"
+# 1. bump the version and close out the changelog
+npm version 0.2.2 --no-git-tag-version
+$EDITOR CHANGELOG.md   # [Unreleased] -> [0.2.2] - <date>, add the link at the bottom
+
+# 2. open a PR — release prep goes through review like anything else
+git checkout -b release/0.2.2
+git commit -am "Bump version to 0.2.2"
+gh pr create --base main --title "Bump version to 0.2.2"
+# wait for CI, then merge
+
+# 3. cut the release (this creates the tag and triggers publishing)
+gh release create v0.2.2 --title "v0.2.2 — <short summary>" --notes "<release notes>"
 ```
+
+Step 3 is the one that publishes. `gh release create` creates the tag for you, so
+there is no separate tagging step.
 
 The tag must be `v` + the exact `version` in `package.json`. The workflow hard-fails
 if they disagree.
+
+## Choosing the version
+
+| Change | Bump |
+| --- | --- |
+| New API, bug fix — anything additive | patch (`0.2.1` → `0.2.2`) |
+| Breaking change to an existing API | minor (`0.2.x` → `0.3.0`) |
+
+Minor is reserved for breaking changes here, which is narrower than SemVer requires for
+`0.x`. Two reasons to keep it that way:
+
+- It matches what the history already says. `0.1.6`–`0.1.12` were fixes; the one minor
+  bump, `0.2.0`, split `PhoenixChannel` into `Connection` + `Channel`.
+- npm reads `^0.2.0` as `>=0.2.0 <0.3.0`, so shipping an additive change as a patch
+  reaches consumers without each of them editing its range. Shipping it as a minor
+  strands them.
+
+`0.3.0` is already spoken for: the `0.2.0` changelog slates `PhoenixChannel` for removal,
+and that removal is the next real breaking change.
 
 ## What the workflow does
 
