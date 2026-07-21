@@ -25,10 +25,14 @@ jobs:
       ref: ${{ steps.v.outputs.ref }}
     steps:
       - id: v
+        # INPUT_VERSION goes through the environment rather than being
+        # interpolated into the script body, which would make the input
+        # executable as shell.
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION="${{ inputs.version }}"
-            VERSION="${VERSION#v}"
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            VERSION="${INPUT_VERSION#v}"
           else
             VERSION="${GITHUB_REF_NAME#v}"
           fi
@@ -105,7 +109,9 @@ jobs:
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
 
-      - name: Verify npm supports trusted publishing
+      # Node 24 already bundles a new enough npm; pinning to latest keeps the
+      # requirement from drifting back under the floor on a runner image bump.
+      - name: Upgrade npm to a version that supports trusted publishing
         run: |
           npm install -g npm@latest
           npm --version
