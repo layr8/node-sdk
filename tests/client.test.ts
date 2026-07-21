@@ -4,6 +4,7 @@ import { IncomingMessage } from "node:http";
 import { Layr8Client, unmarshalBody, ProblemReportError, ServerRejectError, logErrors, PASS } from "../src/index.js";
 import type { Message, ErrorHandler } from "../src/index.js";
 import { ErrorKind, SDKError } from "../src/index.js";
+import { delay, ephemeralServer, readyUrl } from "./helpers/mock-ws-server.js";
 
 /** Discard all errors — used by tests that don't care about error callbacks. */
 const discardErrors: ErrorHandler = () => {};
@@ -14,11 +15,9 @@ class MockPhoenixServer {
   private client: WS | null = null;
   private received: Array<{ event: string; payload: unknown }> = [];
   onMsg: ((msg: { event: string; ref: string | null; topic: string; payload: unknown }) => void) | null = null;
-  port: number;
 
-  constructor(port: number) {
-    this.port = port;
-    this.wss = new WebSocketServer({ port });
+  constructor() {
+    this.wss = ephemeralServer();
     this.wss.on("connection", (ws: WS) => {
       this.client = ws;
       ws.on("message", (data: Buffer) => {
@@ -34,6 +33,11 @@ class MockPhoenixServer {
         this.onMsg?.(msg);
       });
     });
+  }
+
+  /** Resolve with the ws:// URL once the kernel has assigned a port. */
+  ready(): Promise<string> {
+    return readyUrl(this.wss);
   }
 
   sendToClient(joinRef: string | null, ref: string | null, topic: string, event: string, payload: unknown): void {
@@ -57,23 +61,12 @@ class MockPhoenixServer {
   }
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 let server: MockPhoenixServer;
-let port: number;
 let wsUrl: string;
 
-// Use a random port range to avoid conflicts
-function randomPort(): number {
-  return 10000 + Math.floor(Math.random() * 50000);
-}
-
 async function setupServer(): Promise<MockPhoenixServer> {
-  port = randomPort();
-  wsUrl = `ws://127.0.0.1:${port}/plugin_socket/websocket`;
-  server = new MockPhoenixServer(port);
+  server = new MockPhoenixServer();
+  wsUrl = await server.ready();
 
   // Default: auto-reply to phx_join with ok, and ack all other messages
   server.onMsg = (msg) => {
@@ -95,8 +88,6 @@ async function setupServer(): Promise<MockPhoenixServer> {
     }
   };
 
-  // Give server time to bind
-  await delay(50);
   return server;
 }
 
@@ -105,9 +96,8 @@ async function setupServer(): Promise<MockPhoenixServer> {
  * Collects all received events for assertions.
  */
 async function setupReplyProtocolServer(): Promise<MockPhoenixServer> {
-  port = randomPort();
-  wsUrl = `ws://127.0.0.1:${port}/plugin_socket/websocket`;
-  server = new MockPhoenixServer(port);
+  server = new MockPhoenixServer();
+  wsUrl = await server.ready();
 
   server.onMsg = (msg) => {
     if (msg.event === "phx_join") {
@@ -1467,9 +1457,8 @@ describe("Layr8Client protocol registration", () => {
 
   it("always includes report-problem protocol in payload_types", async () => {
     let joinPayload: any = null;
-    port = randomPort();
-    wsUrl = `ws://127.0.0.1:${port}/plugin_socket/websocket`;
-    server = new MockPhoenixServer(port);
+    server = new MockPhoenixServer();
+    wsUrl = await server.ready();
 
     server.onMsg = (msg) => {
       if (msg.event === "phx_join") {
@@ -1495,9 +1484,8 @@ describe("Layr8Client protocol registration", () => {
 
   it("does not duplicate report-problem if already registered", async () => {
     let joinPayload: any = null;
-    port = randomPort();
-    wsUrl = `ws://127.0.0.1:${port}/plugin_socket/websocket`;
-    server = new MockPhoenixServer(port);
+    server = new MockPhoenixServer();
+    wsUrl = await server.ready();
 
     server.onMsg = (msg) => {
       if (msg.event === "phx_join") {
@@ -1526,9 +1514,8 @@ describe("Layr8Client protocol registration", () => {
 
   it("skips report-problem when catch-all (*) is registered", async () => {
     let joinPayload: any = null;
-    port = randomPort();
-    wsUrl = `ws://127.0.0.1:${port}/plugin_socket/websocket`;
-    server = new MockPhoenixServer(port);
+    server = new MockPhoenixServer();
+    wsUrl = await server.ready();
 
     server.onMsg = (msg) => {
       if (msg.event === "phx_join") {

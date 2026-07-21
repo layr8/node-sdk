@@ -9,6 +9,7 @@
 import { describe, it, expect, afterEach, beforeEach } from "vitest";
 import { WebSocketServer, WebSocket as WS } from "ws";
 import { Layr8Client, NotConnectedError, type ErrorHandler } from "../src/index.js";
+import { delay, ephemeralServer, readyUrl } from "./helpers/mock-ws-server.js";
 
 const discardErrors: ErrorHandler = () => {};
 
@@ -20,7 +21,6 @@ class MockServer {
   private client: WS | null = null;
   readonly joinedTopics: string[] = [];
   readonly sent: Array<{ event: string; topic: string; payload: unknown }> = [];
-  readonly port: number;
 
   /**
    * Reject the next N phx_join attempts for the given topic with
@@ -30,9 +30,8 @@ class MockServer {
    */
   readonly rejectJoinAttempts = new Map<string, number>();
 
-  constructor(port: number) {
-    this.port = port;
-    this.wss = new WebSocketServer({ port });
+  constructor() {
+    this.wss = ephemeralServer();
     this.wss.on("connection", (ws: WS) => {
       this.client = ws;
       ws.on("message", (data: Buffer) => {
@@ -71,6 +70,11 @@ class MockServer {
     });
   }
 
+  /** Resolve with the ws:// URL once the kernel has assigned a port. */
+  ready(): Promise<string> {
+    return readyUrl(this.wss);
+  }
+
   sendOnTopic(topic: string, payload: unknown): void {
     if (this.client && this.client.readyState === WS.OPEN) {
       this.client.send(JSON.stringify([null, null, topic, "message", payload]));
@@ -94,22 +98,12 @@ class MockServer {
   }
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function randomPort(): number {
-  return 10000 + Math.floor(Math.random() * 50000);
-}
-
 let server: MockServer;
 let wsUrl: string;
 
 beforeEach(async () => {
-  const port = randomPort();
-  wsUrl = `ws://127.0.0.1:${port}/plugin_socket/websocket`;
-  server = new MockServer(port);
-  await delay(50);
+  server = new MockServer();
+  wsUrl = await server.ready();
 });
 
 afterEach(async () => {

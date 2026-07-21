@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { WebSocketServer, WebSocket as WS } from "ws";
 import { Layr8Client, McpError, DEFAULT_MCP_BASE, logErrors } from "../src/index.js";
 import type { ErrorHandler } from "../src/index.js";
+import { ephemeralServer, readyUrl } from "./helpers/mock-ws-server.js";
 
 const discardErrors: ErrorHandler = () => {};
 
@@ -13,8 +14,8 @@ class MockPhoenixServer {
     | ((msg: { joinRef: string | null; ref: string | null; topic: string; event: string; payload: unknown }) => void)
     | null = null;
 
-  constructor(readonly port: number) {
-    this.wss = new WebSocketServer({ port });
+  constructor() {
+    this.wss = ephemeralServer();
     this.wss.on("connection", (ws: WS) => {
       this.client = ws;
       ws.on("message", (data: Buffer) => {
@@ -30,6 +31,11 @@ class MockPhoenixServer {
     });
   }
 
+  /** Resolve with the ws:// URL once the kernel has assigned a port. */
+  ready(): Promise<string> {
+    return readyUrl(this.wss);
+  }
+
   sendToClient(joinRef: string | null, ref: string | null, topic: string, event: string, payload: unknown): void {
     if (this.client && this.client.readyState === WS.OPEN) {
       this.client.send(JSON.stringify([joinRef, ref, topic, event, payload]));
@@ -40,9 +46,6 @@ class MockPhoenixServer {
     return new Promise((resolve) => this.wss.close(() => resolve()));
   }
 }
-
-const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const randomPort = () => 10000 + Math.floor(Math.random() * 50000);
 
 const MY = "did:web:alice";
 const PEER = "did:web:bob";
@@ -55,9 +58,8 @@ let server: MockPhoenixServer;
  * a JSON-RPC body produced by `respond(outboundJsonRpc)`.
  */
 async function mcpServer(respond: (rpc: any) => { result?: unknown; error?: unknown }): Promise<string> {
-  const port = randomPort();
-  const wsUrl = `ws://127.0.0.1:${port}/plugin_socket/websocket`;
-  server = new MockPhoenixServer(port);
+  server = new MockPhoenixServer();
+  const wsUrl = await server.ready();
   server.onMsg = (msg) => {
     if (msg.event === "phx_join") {
       server.sendToClient(msg.ref, msg.ref, msg.topic, "phx_reply", { status: "ok", response: { did: "did:web:node:test" } });
@@ -80,7 +82,6 @@ async function mcpServer(respond: (rpc: any) => { result?: unknown; error?: unkn
       });
     }
   };
-  await delay(50);
   return wsUrl;
 }
 

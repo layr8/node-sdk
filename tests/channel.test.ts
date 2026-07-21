@@ -3,17 +3,16 @@ import { WebSocketServer, WebSocket as WS } from "ws";
 import { PhoenixChannel } from "../src/channel.js";
 import { NotConnectedError } from "../src/errors.js";
 import type { DidSpec } from "../src/config.js";
+import { delay, ephemeralServer, readyUrl } from "./helpers/mock-ws-server.js";
 
 /** Minimal Phoenix Channel V2 mock server. */
 class MockPhoenixServer {
   private wss: WebSocketServer;
   private client: WS | null = null;
   onMsg: ((msg: { event: string; ref: string | null; topic: string; payload: unknown; joinRef: string | null }) => void) | null = null;
-  port: number;
 
-  constructor(port: number) {
-    this.port = port;
-    this.wss = new WebSocketServer({ port });
+  constructor() {
+    this.wss = ephemeralServer();
     this.wss.on("connection", (ws: WS) => {
       this.client = ws;
       ws.on("message", (data: Buffer) => {
@@ -28,6 +27,11 @@ class MockPhoenixServer {
         this.onMsg?.(msg);
       });
     });
+  }
+
+  /** Resolve with the ws:// URL once the kernel has assigned a port. */
+  ready(): Promise<string> {
+    return readyUrl(this.wss);
   }
 
   sendToClient(joinRef: string | null, ref: string | null, topic: string, event: string, payload: unknown): void {
@@ -49,14 +53,6 @@ class MockPhoenixServer {
       this.wss.close(() => resolve());
     });
   }
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function randomPort(): number {
-  return 10000 + Math.floor(Math.random() * 50000);
 }
 
 function autoReplyJoin(server: MockPhoenixServer): void {
@@ -81,10 +77,8 @@ describe("PhoenixChannel didSpec", () => {
   });
 
   it("sends custom didSpec in join payload", async () => {
-    const port = randomPort();
-    const wsUrl = `ws://127.0.0.1:${port}/plugin_socket/websocket`;
-    server = new MockPhoenixServer(port);
-    await delay(50);
+    server = new MockPhoenixServer();
+    const wsUrl = await server.ready();
 
     const customSpec: DidSpec = {
       mode: "Require",
@@ -132,10 +126,8 @@ describe("PhoenixChannel didSpec", () => {
   });
 
   it("uses default didSpec when none provided", async () => {
-    const port = randomPort();
-    const wsUrl = `ws://127.0.0.1:${port}/plugin_socket/websocket`;
-    server = new MockPhoenixServer(port);
-    await delay(50);
+    server = new MockPhoenixServer();
+    const wsUrl = await server.ready();
 
     const joinPayloadReceived = new Promise<unknown>((resolve) => {
       server.onMsg = (msg) => {
@@ -178,10 +170,8 @@ describe("PhoenixChannel capability negotiation", () => {
   });
 
   it("sends reply_protocol: true in join params", async () => {
-    const port = randomPort();
-    const wsUrl = `ws://127.0.0.1:${port}/plugin_socket/websocket`;
-    server = new MockPhoenixServer(port);
-    await delay(50);
+    server = new MockPhoenixServer();
+    const wsUrl = await server.ready();
 
     const joinPayloadReceived = new Promise<unknown>((resolve) => {
       server.onMsg = (msg) => {
@@ -207,10 +197,8 @@ describe("PhoenixChannel capability negotiation", () => {
   });
 
   it("reports new mode when server returns reply_protocol/1 capability", async () => {
-    const port = randomPort();
-    const wsUrl = `ws://127.0.0.1:${port}/plugin_socket/websocket`;
-    server = new MockPhoenixServer(port);
-    await delay(50);
+    server = new MockPhoenixServer();
+    const wsUrl = await server.ready();
 
     server.onMsg = (msg) => {
       if (msg.event === "phx_join") {
@@ -237,10 +225,8 @@ describe("PhoenixChannel capability negotiation", () => {
   });
 
   it("reports legacy mode when server omits capabilities", async () => {
-    const port = randomPort();
-    const wsUrl = `ws://127.0.0.1:${port}/plugin_socket/websocket`;
-    server = new MockPhoenixServer(port);
-    await delay(50);
+    server = new MockPhoenixServer();
+    const wsUrl = await server.ready();
 
     server.onMsg = (msg) => {
       if (msg.event === "phx_join") {
@@ -269,11 +255,9 @@ describe("PhoenixChannel reconnect", () => {
   });
 
   it("reconnects after connection drop", async () => {
-    const port = randomPort();
-    const wsUrl = `ws://127.0.0.1:${port}/plugin_socket/websocket`;
-    server = new MockPhoenixServer(port);
+    server = new MockPhoenixServer();
+    const wsUrl = await server.ready();
     autoReplyJoin(server);
-    await delay(50);
 
     let disconnected = false;
     let reconnected = false;
@@ -304,11 +288,9 @@ describe("PhoenixChannel reconnect", () => {
   }, 10_000);
 
   it("send() throws NotConnectedError during reconnect", async () => {
-    const port = randomPort();
-    const wsUrl = `ws://127.0.0.1:${port}/plugin_socket/websocket`;
-    server = new MockPhoenixServer(port);
+    server = new MockPhoenixServer();
+    const wsUrl = await server.ready();
     autoReplyJoin(server);
-    await delay(50);
 
     const disconnectedPromise = new Promise<PhoenixChannel>((resolve) => {
       const ch = new PhoenixChannel(wsUrl, "test-api-key", "did:web:test", {
@@ -335,11 +317,9 @@ describe("PhoenixChannel reconnect", () => {
   }, 10_000);
 
   it("close() stops the reconnect loop", async () => {
-    const port = randomPort();
-    const wsUrl = `ws://127.0.0.1:${port}/plugin_socket/websocket`;
-    server = new MockPhoenixServer(port);
+    server = new MockPhoenixServer();
+    const wsUrl = await server.ready();
     autoReplyJoin(server);
-    await delay(50);
 
     let reconnected = false;
     const ch = new PhoenixChannel(wsUrl, "test-api-key", "did:web:test", {
