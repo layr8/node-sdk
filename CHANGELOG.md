@@ -6,6 +6,39 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
 
 ## [Unreleased]
 
+### Added
+
+- **Verifiable Grants are attached to outbound messages** — automatically, on
+  every send path (`send`, `request`, and a handler's reply). The cloud-node
+  requires a grant for anything its policy does not allow outright, and nothing
+  in this SDK attached one: there was no enforcement on outgoing requests because
+  there was no *mechanism*. An agent connecting directly, on any protocol other
+  than MCP through the broker, sent nothing and was denied with a message that
+  names the grant it could not find — which reads as "your grant is
+  misconfigured" when the truth is "no credential was ever put on the wire".
+
+  On by default. Opting in would have left every existing agent in exactly that
+  state. Turn it off with `attachGrants: false` / `LAYR8_ATTACH_GRANTS=false` and
+  compose `attachments` yourself; attachments you supply are never displaced.
+
+- `onGrantMiss` — called when the node denies a message that went out with
+  nothing attached, carrying the node's denial code. Also called immediately,
+  with `error`, when the grants could not be read at all. The sender is the only
+  party that can tell those apart from a misconfigured grant.
+
+- `client.refreshGrants(did?)` — drop the cached grants for a DID, for an agent
+  that has just been told it was granted something and should not wait out
+  `grantCacheMs`.
+
+- `grantCacheMs` (default 60s, env `LAYR8_GRANT_CACHE_MS`) — how long held grants
+  are cached before re-reading.
+
+### Fixed
+
+- Outbound writes keep **call order** even though attaching now puts an `await`
+  in front of every one of them. `send(A)` then `send(B)`, with A's credential
+  read the slower, previously arrived as `[B, A]`.
+
 ## [0.2.1] - 2026-07-21
 
 ### Added

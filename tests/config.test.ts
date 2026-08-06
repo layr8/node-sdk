@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { resolveConfig, DEFAULT_DID_SPEC } from "../src/config.js";
+import { resolveConfig, DEFAULT_DID_SPEC, DEFAULT_GRANT_CACHE_MS } from "../src/config.js";
 import type { DidSpec } from "../src/config.js";
 
 describe("resolveConfig", () => {
@@ -116,5 +116,54 @@ describe("resolveConfig", () => {
     expect(cfg.didSpec.verificationMethods).toEqual(
       DEFAULT_DID_SPEC.verificationMethods,
     );
+  });
+});
+
+describe("grant attachment options", () => {
+  const originalEnv = { ...process.env };
+  const base = { nodeUrl: "ws://localhost:4000", apiKey: "test-api-key" };
+
+  afterEach(() => {
+    process.env = { ...originalEnv };
+  });
+
+  it("attaches grants by default", () => {
+    expect(resolveConfig(base).attachGrants).toBe(true);
+    expect(resolveConfig(base).grantCacheMs).toBe(DEFAULT_GRANT_CACHE_MS);
+  });
+
+  it("can be turned off from the environment, for a deployment nobody can rebuild", () => {
+    // The same reason `nodeUrl` and `apiKey` have an env fallback. Without it,
+    // the only way to stop attaching is a code change and a release.
+    process.env.LAYR8_ATTACH_GRANTS = "false";
+    expect(resolveConfig(base).attachGrants).toBe(false);
+
+    process.env.LAYR8_ATTACH_GRANTS = "0";
+    expect(resolveConfig(base).attachGrants).toBe(false);
+  });
+
+  it("lets explicit config win over the environment", () => {
+    process.env.LAYR8_ATTACH_GRANTS = "false";
+    expect(resolveConfig({ ...base, attachGrants: true }).attachGrants).toBe(true);
+  });
+
+  it("ignores an env value it does not understand rather than reading it as off", () => {
+    // An exported-but-empty variable is the common case, and silently disabling
+    // attachment produces exactly the denial this feature exists to prevent.
+    process.env.LAYR8_ATTACH_GRANTS = "";
+    expect(resolveConfig(base).attachGrants).toBe(true);
+
+    process.env.LAYR8_ATTACH_GRANTS = "maybe";
+    expect(resolveConfig(base).attachGrants).toBe(true);
+  });
+
+  it("takes the cache TTL from the environment, and ignores a typo", () => {
+    process.env.LAYR8_GRANT_CACHE_MS = "5000";
+    expect(resolveConfig(base).grantCacheMs).toBe(5000);
+
+    // `Number("30s")` is NaN, and every TTL comparison against NaN is false —
+    // which would re-read the credentials on EVERY message.
+    process.env.LAYR8_GRANT_CACHE_MS = "30s";
+    expect(resolveConfig(base).grantCacheMs).toBe(DEFAULT_GRANT_CACHE_MS);
   });
 });

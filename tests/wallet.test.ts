@@ -1,8 +1,7 @@
-import { readFileSync } from "node:fs";
-
 import { describe, it, expect, vi } from "vitest";
 
 import {
+  MAX_ATTACHED,
   Wallet,
   parseCredential,
   selectFor,
@@ -106,20 +105,20 @@ describe("selecting the covering set", () => {
     expect(selectFor([c], { recipients: ["did:web:elsewhere.com:agents/x"], typeUri: `${PROTO}/t` })).toEqual([]);
   });
 
-  describe("the tool allowlist", () => {
-    it("skips a grant whose allowlist excludes this tool", () => {
-      // Its embedded rego would deny, so attaching it achieves nothing but noise.
+  describe("the tool allowlist is NOT a filter here", () => {
+    // `grant.rego` allows on the first passing grant and ignores the rest, so an
+    // extra credential on the wire costs nothing — while one withheld costs a
+    // working call, invisibly, as the same "no grant covers this call" this
+    // exists to end.
+    //
+    // An earlier version filtered on `credentialSubject.grant.tools`, reasoning
+    // that the grant's embedded rego would deny anyway. It was the only rule
+    // stricter than the policy, and no policy reads `grant.tools` at all — helix
+    // evaluates `constraints.rego`, keyed by grant id, which this side cannot
+    // reproduce. The filter read `body.params.name` protocol-blind, so any
+    // JSON-RPC-shaped body could drop a grant the node would have honoured.
+    it("attaches a grant whose allowlist does not name this tool", () => {
       const out = selectFor([held({ tools: ["read"] })], {
-        recipients: [AGENT],
-        typeUri: `${PROTO}/tools-call`,
-        tool: "write",
-      });
-
-      expect(out).toEqual([]);
-    });
-
-    it("an EMPTY allowlist is unconstrained, not empty-means-nothing", () => {
-      const out = selectFor([held({ tools: [] })], {
         recipients: [AGENT],
         typeUri: `${PROTO}/tools-call`,
         tool: "write",
@@ -127,6 +126,75 @@ describe("selecting the covering set", () => {
 
       expect(out).toHaveLength(1);
     });
+  });
+});
+
+describe("what goes on the wire stays bounded and distinguishable", () => {
+  const jwt = (payload: unknown, sig: string) =>
+    `${Buffer.from(JSON.stringify({ alg: "EdDSA" })).toString("base64url")}.${Buffer.from(
+      JSON.stringify(payload),
+    ).toString("base64url")}.${sig}`;
+
+  const anon = (sig: string) =>
+    parseCredential({
+      credential_jwt: jwt({ credentialSubject: { scope: [{ protocol: PROTO, messageTypes: ["*"] }] } }, sig),
+    })!;
+
+  it("gives two id-less credentials DIFFERENT attachment ids", () => {
+    // The fallback used to be the head of the JWT, which every credential from
+    // one issuer shares — so they all got the same attachment id, and a frame
+    // carrying two attachments under one id is a frame whose second attachment
+    // may not survive.
+    const [a, b] = [anon("c2lnLWFhYQ"), anon("c2lnLWJiYg")];
+
+    expect(a.id).not.toBe(b.id);
+  });
+
+  it("caps the set — a per-tool holder must not send 60 JWTs per message", () => {
+    const many = Array.from({ length: MAX_ATTACHED + 8 }, (_, i) => anon(`c2ln${i}`));
+
+    expect(selectFor(many, { recipients: [AGENT], typeUri: `${PROTO}/t` })).toHaveLength(MAX_ATTACHED);
+  });
+
+  it("when it caps, a LIVE grant keeps its slot over a lapsed one", () => {
+    // Validity is the PDP's decision and nothing is withheld for it. But if
+    // something must be left off, it should be the entry that has certainly
+    // lapsed — not a coin flip decided by read order.
+    const dead = Array.from({ length: MAX_ATTACHED }, (_, i) => ({
+      ...anon(`c2lnZGVhZA${i}`),
+      expiresAt: 1_000,
+    }));
+    const live = { ...anon("c2lnbGl2ZQ"), expiresAt: 9_000 };
+
+    const out = selectFor([...dead, live], {
+      recipients: [AGENT],
+      typeUri: `${PROTO}/t`,
+      now: 5_000,
+    });
+
+    expect(out.map((a) => a.id)).toContain(live.id);
+  });
+
+  it("rejects anything that is not a three-segment compact JWS", () => {
+    const claims = { credentialSubject: { scope: [{ protocol: PROTO, messageTypes: ["*"] }] } };
+    const body = Buffer.from(JSON.stringify(claims)).toString("base64url");
+
+    expect(parseCredential({ credential_jwt: `hdr.${body}` })).toBeNull();
+    expect(parseCredential({ credential_jwt: `hdr.${body}.` })).toBeNull();
+    expect(parseCredential({ credential_jwt: `hdr.${body}.sig` })).not.toBeNull();
+  });
+
+  it("reads `valid_until` off the record without acting on it", () => {
+    // Recorded, and used ONLY as the tiebreak above. A skewed local clock that
+    // withheld a live grant would fail silently, which is the failure mode this
+    // whole file exists to end.
+    const c = parseCredential({
+      credential_jwt: jwt({ credentialSubject: { scope: [{ protocol: PROTO, messageTypes: ["*"] }] } }, "c2ln"),
+      valid_until: "2020-01-01T00:00:00Z",
+    })!;
+
+    expect(c.expiresAt).toBe(Date.parse("2020-01-01T00:00:00Z"));
+    expect(selectFor([c], { recipients: [AGENT], typeUri: `${PROTO}/t` })).toHaveLength(1);
   });
 });
 
@@ -242,6 +310,36 @@ describe("Wallet", () => {
     expect(get).toHaveBeenCalledTimes(2);
   });
 
+  it("costs ONE read for N concurrent callers", async () => {
+    // The PROMISE is cached, not the result. Caching the result leaves a window
+    // between "cache missed" and "cache written" that every concurrent caller
+    // falls into: measured, ten callers at cold start made ten identical HTTP
+    // requests. The client's per-channel write chain hides this for same-channel
+    // sends, which is why the claim is pinned HERE, where it is actually made.
+    const { get, reader } = okReader();
+    const w = new Wallet(reader);
+
+    await Promise.all(Array.from({ length: 10 }, () => w.heldBy(AGENT)));
+
+    expect(get).toHaveBeenCalledTimes(1);
+  });
+
+  it("remembers a FAILURE briefly — and never as long as a success", async () => {
+    // Only caching successes turns a config mistake — an API key that cannot
+    // read credentials — into a permanent per-message latency tax on an agent
+    // that is otherwise working. Caching it for the full TTL is the opposite
+    // mistake: the fix should take effect without a restart.
+    const get = vi.fn().mockRejectedValueOnce(new Error("HTTP 500")).mockResolvedValue(body);
+    const w = new Wallet({ get } as { get<T>(p: string): Promise<T> }, 60_000, 5_000);
+
+    await expect(w.heldBy(AGENT, 0)).rejects.toThrow(/500/);
+    await expect(w.heldBy(AGENT, 1_000)).rejects.toThrow(/500/);
+    expect(get, "a cached failure must not re-ask").toHaveBeenCalledTimes(1);
+
+    expect(await w.heldBy(AGENT, 6_000)).toHaveLength(1);
+    expect(get).toHaveBeenCalledTimes(2);
+  });
+
   it("throws on a failed read rather than reporting no grants", async () => {
     // "No grants" and "could not ask" are different, and conflating them is the
     // whole reason this file exists. The caller turns it into `onGrantMiss`.
@@ -261,6 +359,6 @@ describe("toolNameOf", () => {
 });
 
 // The source-level wiring checks that used to live here are gone. They asserted
-// the code LOOKED like it attached;  drives a real client
+// the code LOOKED like it attached; `attach-grants.test.ts` drives a real client
 // against a fake node and reads the attachment off the wire, which is the claim
 // that was actually wanted. A grep and a behaviour are not the same evidence.

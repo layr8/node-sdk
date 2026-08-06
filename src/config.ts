@@ -54,14 +54,18 @@ export interface Config {
   didSpec?: DidSpec;
   /**
    * Attach the Verifiable Grants covering each outbound message. Default `true`.
+   * Fallback: LAYR8_ATTACH_GRANTS env (`"false"`/`"0"` turns it off).
    *
    * The node requires a grant for anything its policy does not allow outright.
    * Turning this off means composing `attachments` yourself; sending nothing is
    * what produced "no grant covers this call" denials that read as a
    * misconfigured grant rather than an absent one.
+   *
+   * The env fallback exists so an operator can turn it off in a deployment they
+   * cannot rebuild — the same reason `nodeUrl` and `apiKey` have one.
    */
   attachGrants?: boolean;
-  /** How long held grants are cached before re-reading. Default 60s. */
+  /** How long held grants are cached before re-reading. Default 60s. Fallback: LAYR8_GRANT_CACHE_MS env. */
   grantCacheMs?: number;
   /**
    * Called when a message went out with NO covering grant, or when the grants
@@ -81,6 +85,24 @@ export interface ResolvedConfig {
   apiKey: string;
   agentDid: string;
   didSpec: Required<DidSpec>;
+  attachGrants: boolean;
+  grantCacheMs: number;
+}
+
+/** Default grant cache TTL. Short: a grant minted seconds ago is invisible until it lapses. */
+export const DEFAULT_GRANT_CACHE_MS = 60_000;
+
+/**
+ * Env booleans, spelled the way operators spell them. Anything unrecognised —
+ * including the empty string an unset-but-exported variable produces — leaves
+ * the code default alone, rather than reading as `false`.
+ */
+function envBool(raw: string | undefined): boolean | undefined {
+  if (raw === undefined) return undefined;
+  const v = raw.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(v)) return true;
+  if (["0", "false", "no", "off"].includes(v)) return false;
+  return undefined;
 }
 
 /** Fills empty fields from environment variables and validates required fields. */
@@ -117,5 +139,20 @@ export function resolveConfig(cfg: Config): ResolvedConfig {
       cfg.didSpec?.verificationMethods ?? DEFAULT_DID_SPEC.verificationMethods,
   };
 
-  return { nodeUrl: normalizedUrl, apiKey, agentDid, didSpec };
+  // A non-numeric or negative env value is ignored rather than turned into
+  // `NaN`, which would make every comparison false and re-read the credentials
+  // on EVERY message — a typo becoming a load problem nobody would connect to it.
+  const envCacheMs = Number(process.env.LAYR8_GRANT_CACHE_MS);
+  const grantCacheMs =
+    cfg.grantCacheMs ??
+    (Number.isFinite(envCacheMs) && envCacheMs >= 0 ? envCacheMs : DEFAULT_GRANT_CACHE_MS);
+
+  return {
+    nodeUrl: normalizedUrl,
+    apiKey,
+    agentDid,
+    didSpec,
+    attachGrants: cfg.attachGrants ?? envBool(process.env.LAYR8_ATTACH_GRANTS) ?? true,
+    grantCacheMs,
+  };
 }
