@@ -11,6 +11,9 @@ on:
         description: "Version to (re-)publish, without the leading v (e.g. 0.2.0)"
         required: true
 
+# Both triggers (`release: published`, `workflow_dispatch`) require write access
+# to this repository, so there is no fork path here and every job runs on our own
+# fleet. `ci.yaml` is the one that needs the fork guard.
 permissions:
   contents: read
 
@@ -19,7 +22,7 @@ jobs:
   # check out the exact tag being released rather than whatever branch a
   # workflow_dispatch happened to run from.
   resolve:
-    runs-on: ubuntu-latest
+    runs-on: layr8-eks-runners
     outputs:
       version: ${{ steps.v.outputs.version }}
       ref: ${{ steps.v.outputs.ref }}
@@ -41,7 +44,7 @@ jobs:
 
   test:
     needs: resolve
-    runs-on: ubuntu-latest
+    runs-on: layr8-eks-runners
     steps:
       - uses: actions/checkout@v6
         with:
@@ -68,7 +71,7 @@ jobs:
 
   compat-test:
     needs: resolve
-    runs-on: ubuntu-latest
+    runs-on: layr8-eks-runners
     steps:
       - uses: actions/checkout@v6
         with:
@@ -88,7 +91,7 @@ jobs:
 
   publish-npm:
     needs: [resolve, test, compat-test]
-    runs-on: ubuntu-latest
+    runs-on: layr8-eks-runners
     permissions:
       contents: read
       # Mints the OIDC token npm exchanges for a short-lived publish
@@ -143,7 +146,7 @@ jobs:
 
   publish-compat-image:
     needs: [resolve, publish-npm]
-    runs-on: ubuntu-latest
+    runs-on: layr8-eks-runners
     permissions:
       contents: read
       packages: write

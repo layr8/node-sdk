@@ -6,9 +6,18 @@ on:
   pull_request:
     branches: [main]
 
+# Our own fleet, EXCEPT for pull requests from forks.
+#
+# This repository is public, so a fork PR is code from someone outside the org.
+# Running that on the self-hosted fleet would hand its author a shell inside our
+# cluster — the one case GitHub says not to use self-hosted runners for. Fork PRs
+# stay on hosted runners, where a compromised job costs nothing.
+#
+# `github.event.pull_request` is null for a `push`, so pushes to main take the
+# self-hosted branch of the expression.
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'layr8-eks-runners' }}
     steps:
       - uses: actions/checkout@v6
 
@@ -31,7 +40,7 @@ jobs:
         run: npm test
 
   compat:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'layr8-eks-runners' }}
     steps:
       - uses: actions/checkout@v6
 
