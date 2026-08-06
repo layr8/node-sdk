@@ -260,32 +260,7 @@ describe("toolNameOf", () => {
   });
 });
 
-describe("the wiring", () => {
-  // `withGrants` sits inside an async send that needs a live socket to reach, so
-  // what is pinned here is the two things a reviewer would check by eye and the
-  // two ways this has been wrong in other codebases: that BOTH outbound paths go
-  // through it (a fix applied to `send` and not to `request` is the same defect
-  // this session found three times in the policy), and that caller-supplied
-  // attachments are not displaced.
-  const src = readFileSync(new URL("../src/client.ts", import.meta.url), "utf8");
-  const code = src.replace(/^\s*\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
-
-  it("both send and request attach", () => {
-    const hooked = code.match(/await this\.withGrants\(this\.fillMessageFrom\(/g) ?? [];
-
-    expect(hooked).toHaveLength(2);
-  });
-
-  it("caller-supplied attachments win", () => {
-    // Someone passing their own has a reason, and silently overriding it would
-    // be the second confusing thing to happen to that message.
-    expect(code).toMatch(/if \(!this\.wallet \|\| msg\.attachments\?\.length\) return msg;/);
-  });
-
-  it("a wallet failure does not block the send", () => {
-    // The node is the authority on whether this message needed a grant, and most
-    // traffic needs none. Refusing here on a transient fetch error would take
-    // down calls that were never going to need us.
-    expect(code).toMatch(/catch \(err\) \{[\s\S]{0,200}onGrantMiss\?\.\(/);
-  });
-});
+// The source-level wiring checks that used to live here are gone. They asserted
+// the code LOOKED like it attached;  drives a real client
+// against a fake node and reads the attachment off the wire, which is the claim
+// that was actually wanted. A grep and a behaviour are not the same evidence.
