@@ -52,6 +52,27 @@ export interface Config {
   agentDid?: string;
   /** DID specification for the cloud-node join handshake. Merged with defaults. */
   didSpec?: DidSpec;
+  /**
+   * Attach the Verifiable Grants covering each outbound message. Default `true`.
+   *
+   * The node requires a grant for anything its policy does not allow outright.
+   * Turning this off means composing `attachments` yourself; sending nothing is
+   * what produced "no grant covers this call" denials that read as a
+   * misconfigured grant rather than an absent one.
+   */
+  attachGrants?: boolean;
+  /** How long held grants are cached before re-reading. Default 60s. */
+  grantCacheMs?: number;
+  /**
+   * Called when a message went out with NO covering grant, or when the grants
+   * could not be read.
+   *
+   * The sender is the only party that knows nothing was attached: the node's
+   * denial names the grant it could not find, which sends people to check a
+   * grant that is fine. Wire this to a log and the next such incident is one
+   * line instead of a day.
+   */
+  onGrantMiss?: (info: { to: string[]; type: string; error?: unknown }) => void;
 }
 
 /** Resolved configuration with required fields guaranteed present. */

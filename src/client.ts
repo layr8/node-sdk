@@ -28,7 +28,7 @@ import {
 import type { ErrorHandler } from "./errors.js";
 import type { HandlerFn, HandlerOptions } from "./handler.js";
 import { HandlerRegistry, PASS } from "./handler.js";
-import type { InternalMessage, Message } from "./message.js";
+import type { Attachment, InternalMessage, Message } from "./message.js";
 import {
   generateId,
   marshalDIDComm,
@@ -38,6 +38,7 @@ import { Connection } from "./connection.js";
 import { Channel } from "./channel.js";
 import { RestClient, restUrlFromWebSocket } from "./rest.js";
 import { McpBinding, DEFAULT_MCP_BASE } from "./mcp.js";
+import { Wallet } from "./wallet.js";
 
 function toError(err: unknown): Error {
   return err instanceof Error ? err : new Error(String(err));
@@ -139,6 +140,13 @@ export class DidHandle {
 export class Layr8Client extends EventEmitter {
   private readonly cfg;
   private readonly onError: ErrorHandler;
+  private readonly wallet: Wallet | null;
+  /** Told when a message went out with no covering grant — see `withGrants`. */
+  private readonly onGrantMiss?: (info: {
+    to: string[];
+    type: string;
+    error?: unknown;
+  }) => void;
   private readonly registry = new HandlerRegistry();
 
   private connection: Connection | null = null;
@@ -177,6 +185,16 @@ export class Layr8Client extends EventEmitter {
       restUrlFromWebSocket(this.cfg.nodeUrl),
       this.cfg.apiKey,
     );
+    // On by default. A grant the node requires and the SDK does not attach is
+    // indistinguishable, from the caller's side, from a grant that was never
+    // issued — and the denial names the grant, not the omission. Opting IN would
+    // have left every existing agent in exactly the state that cost two teams
+    // days.
+    this.wallet =
+      cfg.attachGrants === false
+        ? null
+        : new Wallet(this.rest, cfg.grantCacheMs);
+    this.onGrantMiss = cfg.onGrantMiss;
   }
 
   /** The primary agent's DID — either provided in Config or assigned by the node on connect(). */
@@ -612,7 +630,7 @@ export class Layr8Client extends EventEmitter {
     msg: Partial<Message>,
     opts?: SendOptions,
   ): Promise<void> {
-    const internal = this.fillMessageFrom(msg, channel.did);
+    const internal = await this.withGrants(this.fillMessageFrom(msg, channel.did));
 
     if (opts?.fireAndForget) {
       this.safeEmit("outbound", internal);
@@ -635,7 +653,7 @@ export class Layr8Client extends EventEmitter {
     msg: Partial<Message>,
     opts?: RequestOptions,
   ): Promise<Message> {
-    const internal = this.fillMessageFrom(msg, channel.did);
+    const internal = await this.withGrants(this.fillMessageFrom(msg, channel.did));
     if (!internal.threadId) {
       internal.threadId = generateId();
     }
@@ -937,6 +955,51 @@ export class Layr8Client extends EventEmitter {
       body: msg.body ?? null,
       ...(msg.attachments ? { attachments: msg.attachments } : {}),
     };
+  }
+
+  /**
+   * Attach the Verifiable Grants that cover this message.
+   *
+   * The node requires one for anything its policy does not allow outright, and
+   * nothing in this SDK attached any — there was no enforcement on outgoing
+   * requests because there was no mechanism. An agent connecting directly, on
+   * any protocol other than MCP through the broker, sent nothing and was denied
+   * with "no grant covers this call": a message that reads as "your grant is
+   * misconfigured" when the truth is "no credential was ever put on the wire".
+   *
+   * Caller-supplied attachments WIN and are never displaced — someone passing
+   * their own has a reason, and silently overriding it would be the second
+   * confusing thing to happen to that message.
+   *
+   * A wallet failure does NOT block the send. The node is the authority on
+   * whether this message needed a grant, and most traffic (discovery,
+   * trust-ping, problem reports) needs none; refusing here on a transient fetch
+   * error would take down calls that were never going to need us. The send
+   * proceeds unattached and `onGrantMiss` says so.
+   */
+  private async withGrants(msg: InternalMessage): Promise<InternalMessage> {
+    if (!this.wallet || msg.attachments?.length) return msg;
+
+    try {
+      const attachments = await this.wallet.attachmentsFor(msg.from, {
+        recipients: msg.to ?? [],
+        typeUri: msg.type,
+        body: msg.body,
+      });
+
+      if (attachments.length > 0) {
+        return { ...msg, attachments: attachments as unknown as Attachment[] };
+      }
+
+      // Nothing covered it. Said out loud, because the sender is the ONLY party
+      // that knows nothing was attached — the denial that follows names the
+      // grant, not the omission, and that misreading has cost days.
+      this.onGrantMiss?.({ to: msg.to ?? [], type: msg.type });
+      return msg;
+    } catch (err) {
+      this.onGrantMiss?.({ to: msg.to ?? [], type: msg.type, error: err });
+      return msg;
+    }
   }
 
   private sendMessageOnChannel(msg: InternalMessage, channel: Channel): void {
