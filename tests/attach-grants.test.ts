@@ -74,14 +74,17 @@ class FakeNode {
   readonly http: Server;
   readonly wss: WebSocketServer;
   readonly frames: Array<{ event: string; payload: Record<string, unknown> }> = [];
-  /** Credential reads the client made, so a test can assert it asked at all. */
-  readonly credentialReads: string[] = [];
+  /** Credential reads the client made, with their headers. */
+  readonly credentialReads: Array<{ url: string; apiKey?: string }> = [];
   grants: unknown[] = [{ credential_jwt: REAL_GRANT_JWT }];
 
   constructor() {
     this.http = createServer((req, res) => {
       if ((req.url ?? "").startsWith("/api/v1/credentials")) {
-        this.credentialReads.push(req.url ?? "");
+        this.credentialReads.push({
+          url: req.url ?? "",
+          apiKey: req.headers["x-api-key"] as string | undefined,
+        });
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({ credentials: this.grants }));
         return;
@@ -208,11 +211,23 @@ describe("a grant reaches the wire", () => {
     expect((msg.attachments as unknown[]) ?? []).toHaveLength(1);
   });
 
-  it("reads the credentials from the REST base derived from the socket URL", async () => {
+  it("asks the node the way the node expects to be asked", async () => {
+    // Every one of these is a way this feature silently does nothing: a dropped
+    // query string means `holder_did` is missing and the node answers 400; a
+    // missing api key means 401; a wrong path means 404. All three surface as
+    // "no grant covers this call" — the same denial as having no grant, which is
+    // the misreading this whole change exists to end.
+    //
+    // The route, the parameter and the response shape are the node's
+    // (`GET /api/v1/credentials?holder_did=…` under scope `/api/v1`, returning
+    // `{credentials: [{credential_jwt, …}]}`), and the MCP broker has been
+    // reading them in production this way for months.
     const c = await connected();
     await sent(c, { to: [RESOURCE], type: MCP_CALL, body: { params: { name: "read_email" } } });
 
-    expect(node!.credentialReads[0]).toContain(encodeURIComponent(AGENT));
+    const [read] = node!.credentialReads;
+    expect(read.url).toBe(`/api/v1/credentials?holder_did=${encodeURIComponent(AGENT)}`);
+    expect(read.apiKey).toBe("test-api-key");
   });
 });
 
