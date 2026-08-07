@@ -634,6 +634,26 @@ export class Layr8Client extends EventEmitter {
    * Sign a W3C Verifiable Presentation wrapping one or more signed credentials.
    * Uses the holder's authentication key (not assertion key).
    * Defaults: holder = client.did, format = "compact_jwt".
+   *
+   * Use this to prove to a VERIFIER that you hold a credential — e.g. a REST
+   * caller presenting proof of a credential to a checking party. It is NOT
+   * the way to attach a Verifiable Grant to an outbound DIDComm message: the
+   * cloud-node's authorization extractor filters attachments by exact
+   * `media_type` match, keeps only `application/vc+jwt`, and drops everything
+   * else — including `application/vp+jwt`, the media type this method
+   * produces — before it ever reads the data. The denial that follows is
+   * byte-for-byte identical to the one you get for attaching nothing at all,
+   * which makes the mistake look like a scope problem instead of a
+   * wire-format one.
+   *
+   * DIDComm already authenticates the sender at the envelope layer, and the
+   * policy requires the grant's `credentialSubject.id` to equal that sender —
+   * so the binding a presentation exists to prove is already established;
+   * there is nothing left for one to add on this path.
+   *
+   * For authorization attachments, use `attachGrants` (on by default — see
+   * the "Verifiable Grants" section of the README) or attach the credential
+   * yourself as `{ id, media_type: "application/vc+jwt", data: { jws } }`.
    */
   async signPresentation(
     credentials: string[],
@@ -659,6 +679,12 @@ export class Layr8Client extends EventEmitter {
   /**
    * Verify a signed presentation using the verifier DID's authentication key.
    * Defaults: verifier = client.did.
+   *
+   * This validates a W3C Verifiable Presentation a holder sent you directly
+   * (e.g. over REST). It does not participate in the cloud-node's
+   * authorization decision for DIDComm messages — that reads Verifiable
+   * Grant attachments directly (`media_type: "application/vc+jwt"`) and never
+   * wraps them in a presentation. See `signPresentation` above.
    */
   async verifyPresentation(
     signedPresentation: string,

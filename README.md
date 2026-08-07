@@ -369,6 +369,32 @@ attaching anything; you then compose `attachments` yourself. Attachments you
 supply are never displaced — a message that already carries attachments is sent
 untouched.
 
+### Not what you want: `signPresentation`
+
+If you hand-built the attachment yourself, or reached for `signPresentation`
+(see [W3C Verifiable Presentations](#w3c-verifiable-presentations)) to attach
+a credential to an outbound message, this section — not that one — is the
+shape the cloud-node actually reads. Its authorization extractor keeps only
+attachments whose `media_type` is exactly `application/vc+jwt`; a W3C
+Verifiable Presentation (`application/vp+jwt`, what `signPresentation`
+produces) is dropped before the data is even read, and the denial that
+follows is indistinguishable from attaching nothing at all — it will read
+like a scope problem, not a wire-format one.
+
+DIDComm already authenticates the sender at the envelope layer, and the
+policy requires the grant's `credentialSubject.id` to equal that sender, so a
+presentation has nothing left to prove on this path.
+
+A hand-rolled attachment must look like:
+
+```typescript
+{
+  id: credentialId,
+  media_type: "application/vc+jwt",
+  data: { jws: rawCredentialJwt },
+}
+```
+
 ## Handler Options
 
 ### Manual Acknowledgment
@@ -657,7 +683,15 @@ The `format` option accepts: `"compact_jwt"` (default), `"json"`, `"jwt"`, `"env
 
 ## W3C Verifiable Presentations
 
-Presentations wrap one or more signed credentials into a holder-signed envelope.
+Presentations wrap one or more signed credentials into a holder-signed
+envelope, for proving to a VERIFIER that you hold a credential — for example,
+a REST caller checking proof of a credential.
+
+> **Not for authorization.** Do not use `signPresentation` to attach a
+> Verifiable Grant to an outbound DIDComm message — the cloud-node's
+> authorization extractor discards `application/vp+jwt` attachments silently.
+> See [Verifiable Grants](#verifiable-grants) for the attachment shape it
+> actually reads.
 
 ### Sign a Presentation
 
