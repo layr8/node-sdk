@@ -1212,9 +1212,12 @@ describe("Layr8Client reply protocol", () => {
     const client = new Layr8Client(discardErrors, {
       nodeUrl: wsUrl, apiKey: "test-key", agentDid: "did:web:alice",
     });
+    // The return type is written out because an `async` arrow widens `PASS`
+    // from its `unique symbol` type to plain `symbol`, which `HandlerFn` does
+    // not accept. Only visible now that this tree is type-checked.
     client.handle(
       "https://layr8.io/protocols/echo/1.0/request",
-      async () => PASS,
+      async (): Promise<typeof PASS> => PASS,
     );
     await client.connect();
 
@@ -1417,7 +1420,7 @@ describe("Layr8Client handleAll", () => {
     const client = new Layr8Client(discardErrors, {
       nodeUrl: wsUrl, apiKey: "test-key", agentDid: "did:web:alice",
     });
-    client.handleAll(async () => PASS);
+    client.handleAll(async (): Promise<typeof PASS> => PASS);
     await client.connect();
 
     server.clearReceived();

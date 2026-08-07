@@ -1,0 +1,18 @@
+{
+  // `tsconfig.json` builds the package, so it excludes `tests` — and nothing
+  // else was type-checking them. That is how `Config.onGrantMiss` shipped
+  // without `denialCode`: the client passed the field, the README's example
+  // destructured it, 184 tests exercised it at runtime, and the one thing that
+  // would have caught it — a compile — never looked at this tree. It also let a
+  // `{ timeoutMs }` that `RequestOptions` has never had sit in a test that
+  // believed it was bounding a request.
+  //
+  // Checked, not built: no emit, and `tsconfig.json` stays the build config.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "."
+  },
+  "include": ["src/**/*", "tests/**/*"],
+  "exclude": ["node_modules", "dist", "examples"]
+}

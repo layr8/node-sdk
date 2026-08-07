@@ -234,6 +234,9 @@ Configuration can be set explicitly or via environment variables. Environment va
 | `nodeUrl` | `LAYR8_NODE_URL` | Yes | WebSocket URL of the cloud-node |
 | `apiKey` | `LAYR8_API_KEY` | Yes | API key for authentication |
 | `agentDid` | `LAYR8_AGENT_DID` | Yes | Agent DID identity |
+| `attachGrants` | `LAYR8_ATTACH_GRANTS` | No | Attach covering Verifiable Grants to outbound messages (default `true`) — see [Verifiable Grants](#verifiable-grants) |
+| `grantCacheMs` | `LAYR8_GRANT_CACHE_MS` | No | How long held grants are cached before re-reading (default `60000`) |
+| `onGrantMiss` | — | No | Called when the node denies a message you sent with no grant attached |
 
 `agentDid` is required — set it explicitly or via `LAYR8_AGENT_DID`. It's the DID your agent connects as and the address other agents use to message it; the cloud-node rejects a connection that doesn't specify one. Retrieve the active DID at runtime with `client.did`.
 
@@ -249,6 +252,80 @@ const client = new Layr8Client(logErrors(), {
 // Set LAYR8_NODE_URL, LAYR8_API_KEY, LAYR8_AGENT_DID
 const client = new Layr8Client(logErrors());
 ```
+
+## Verifiable Grants
+
+The cloud-node requires a Verifiable Grant for any message its policy does not
+allow outright. **The SDK attaches them for you**, on every outbound path —
+`send`, `request`, and a handler's reply.
+
+You do not configure anything. On the first send the SDK reads the grants your
+agent DID holds, keeps the covering ones on the message, and caches the set for
+`grantCacheMs`.
+
+```typescript
+// Nothing to do — the grants covering this message are attached.
+await client.send({
+  to: ["did:web:example.com:mcp:gmail:gmail"],
+  type: "https://layr8.io/protocols/mcp/1.0/tools-call",
+  body: { method: "tools/call", params: { name: "search_emails" } },
+});
+```
+
+### When a call is denied
+
+A denial reads `Authorization requirements not met` and names the grant the node
+could not find — which sends people to check a grant that is fine. The sender is
+the only party that knows whether a credential was ever put on the wire, so wire
+up `onGrantMiss` and the next such incident is one line instead of a day:
+
+```typescript
+const client = new Layr8Client(logErrors(), {
+  onGrantMiss: ({ to, type, denialCode, error, capped }) => {
+    if (error) console.warn("could not read grants:", error);
+    else if (capped) console.warn(`only ${capped.attached} of ${capped.covering} grants fit`);
+    else console.warn(`${denialCode}: sent ${type} to ${to} with NO grant attached`);
+  },
+});
+```
+
+It fires on the **denial**, not on every send — most DIDComm traffic (discovery,
+trust-ping, problem reports) needs no grant at all, and a diagnostic that fires
+constantly is one nobody reads when it matters. Two things are announced
+immediately instead, because neither is ever a normal outcome: a failure to
+*read* the grants (every subsequent send is flying blind), and a covering set
+large enough that some of it had to be left off the message.
+
+### If the node stops answering
+
+The credential read that precedes a send is bounded by `grantReadTimeoutMs`
+(2s by default, env `LAYR8_GRANT_READ_TIMEOUT_MS`). On a timeout the message goes
+out **unattached** and `onGrantMiss` is called with the error — the node is the
+authority on whether that message needed a grant, and refusing to send would take
+down calls that never did.
+
+The deadline is not optional politeness. The read runs inside the per-channel
+write chain, which is what keeps outbound writes in call order, so an unbounded
+read would stall every later send on that channel — including ones that carry
+their own attachments and never consult the wallet.
+
+### A grant issued just now
+
+Held grants are cached for `grantCacheMs` (60s by default), so a grant minted
+seconds ago is invisible until the cache lapses. If your agent has just been told
+it was granted something, say so:
+
+```typescript
+client.refreshGrants();          // this agent's DID
+client.refreshGrants(otherDid);  // a DID joined with joinDid()
+```
+
+### Turning it off
+
+`attachGrants: false` (or `LAYR8_ATTACH_GRANTS=false`) stops the SDK reading or
+attaching anything; you then compose `attachments` yourself. Attachments you
+supply are never displaced — a message that already carries attachments is sent
+untouched.
 
 ## Handler Options
 

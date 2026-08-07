@@ -19,7 +19,7 @@
     "build": "tsc",
     "test": "vitest run",
     "test:watch": "vitest",
-    "lint": "tsc --noEmit",
+    "lint": "tsc --noEmit && tsc --noEmit -p tsconfig.tests.json",
     "compat:test": "vitest run --config compat/vitest.config.ts",
     "compat:build": "tsc -p compat/tsconfig.build.json"
   },

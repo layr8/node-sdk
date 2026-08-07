@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import type { Config, DidSpec } from "./config.js";
+import type { Config, DidSpec, GrantMissInfo } from "./config.js";
 import { resolveConfig } from "./config.js";
 import type {
   Credential,
@@ -28,16 +28,17 @@ import {
 import type { ErrorHandler } from "./errors.js";
 import type { HandlerFn, HandlerOptions } from "./handler.js";
 import { HandlerRegistry, PASS } from "./handler.js";
-import type { InternalMessage, Message } from "./message.js";
+import type { Attachment, InternalMessage, Message } from "./message.js";
 import {
   generateId,
   marshalDIDComm,
   parseDIDComm,
 } from "./message.js";
 import { Connection } from "./connection.js";
-import { Channel } from "./channel.js";
+import { Channel, type ServerReply } from "./channel.js";
 import { RestClient, restUrlFromWebSocket } from "./rest.js";
 import { McpBinding, DEFAULT_MCP_BASE } from "./mcp.js";
+import { Wallet } from "./wallet.js";
 
 function toError(err: unknown): Error {
   return err instanceof Error ? err : new Error(String(err));
@@ -136,9 +137,32 @@ export class DidHandle {
  * Extends EventEmitter for "disconnect", "reconnect", "inbound" and
  * "outbound" events.
  */
+/** The one inbound type `noteDenial` cares about. */
+const PROBLEM_REPORT_TYPE = "https://didcomm.org/report-problem/2.0/problem-report";
+
+/**
+ * How long a message sent with nothing attached is kept, waiting for a denial.
+ *
+ * The node evaluates before it delivers, so the denial follows its message by a
+ * round trip — one second would cover it. A minute is chosen to survive a
+ * paused process or a reconnect, and it is what bounds the map: see
+ * `rememberUnattached`.
+ */
+const UNATTACHED_WINDOW_MS = 60_000;
+
 export class Layr8Client extends EventEmitter {
   private readonly cfg;
   private readonly onError: ErrorHandler;
+  private readonly wallet: Wallet | null;
+  /** Per-channel write chain — see `ordered`. */
+  private readonly writeChains = new WeakMap<Channel, Promise<void>>();
+  /**
+   * Messages that went out with nothing attached, keyed by thread, so a denial
+   * can be matched back to them. Bounded — this is a diagnostic, not a ledger.
+   */
+  private readonly unattached = new Map<string, { at: number; to: string[]; type: string }>();
+  /** Told when a message went out with no covering grant — see `withGrants`. */
+  private readonly onGrantMiss?: (info: GrantMissInfo) => void;
   private readonly registry = new HandlerRegistry();
 
   private connection: Connection | null = null;
@@ -177,6 +201,30 @@ export class Layr8Client extends EventEmitter {
       restUrlFromWebSocket(this.cfg.nodeUrl),
       this.cfg.apiKey,
     );
+    // On by default. A grant the node requires and the SDK does not attach is
+    // indistinguishable, from the caller's side, from a grant that was never
+    // issued — and the denial names the grant, not the omission. Opting IN would
+    // have left every existing agent in exactly the state that cost two teams
+    // days.
+    this.wallet = this.cfg.attachGrants
+      ? new Wallet(this.rest, this.cfg.grantCacheMs, undefined, this.cfg.grantReadTimeoutMs)
+      : null;
+    this.onGrantMiss = cfg.onGrantMiss;
+  }
+
+  /**
+   * Forget the cached grants for `did` (default: this agent's), so the next
+   * message re-reads them.
+   *
+   * The cache TTL is the whole freshness story: a grant minted seconds ago is
+   * invisible until it lapses. An agent that has just been TOLD it was granted
+   * something — by a request/approve flow, or by a person on the other end of a
+   * chat — should not have to wait out a timer it cannot see. Without this the
+   * `Wallet.refresh` underneath was unreachable: the wallet is private and not
+   * exported, so the only cure for a stale cache was a restart.
+   */
+  refreshGrants(did?: string): void {
+    this.wallet?.refresh(did ?? this.agentDid);
   }
 
   /** The primary agent's DID — either provided in Config or assigned by the node on connect(). */
@@ -612,18 +660,26 @@ export class Layr8Client extends EventEmitter {
     msg: Partial<Message>,
     opts?: SendOptions,
   ): Promise<void> {
-    const internal = this.fillMessageFrom(msg, channel.did);
+    const filled = this.fillMessageFrom(msg, channel.did);
 
     if (opts?.fireAndForget) {
-      this.safeEmit("outbound", internal);
-      const data = marshalDIDComm(internal);
-      channel.sendFireAndForget("message", JSON.parse(data));
-      return;
+      return this.ordered(channel, async () => {
+        const internal = await this.withGrants(filled);
+        this.safeEmit("outbound", internal);
+        channel.sendFireAndForget("message", JSON.parse(marshalDIDComm(internal)));
+      });
     }
 
-    this.safeEmit("outbound", internal);
-    const data = marshalDIDComm(internal);
-    const reply = await channel.send("message", JSON.parse(data));
+    // The WRITE is ordered; the reply is awaited outside the chain, so a slow
+    // acknowledgement does not hold up the next caller's message.
+    let sent: Promise<ServerReply> | undefined;
+    await this.ordered(channel, async () => {
+      const internal = await this.withGrants(filled);
+      this.safeEmit("outbound", internal);
+      sent = channel.send("message", JSON.parse(marshalDIDComm(internal)));
+    });
+
+    const reply = await sent!;
     if (reply.status === "error") {
       throw new ServerRejectError(reply.reason || reply.status);
     }
@@ -635,13 +691,17 @@ export class Layr8Client extends EventEmitter {
     msg: Partial<Message>,
     opts?: RequestOptions,
   ): Promise<Message> {
-    const internal = this.fillMessageFrom(msg, channel.did);
-    if (!internal.threadId) {
-      internal.threadId = generateId();
+    const filled = this.fillMessageFrom(msg, channel.did);
+    if (!filled.threadId) {
+      filled.threadId = generateId();
     }
     if (opts?.parentThread) {
-      internal.parentThreadId = opts.parentThread;
+      filled.parentThreadId = opts.parentThread;
     }
+    // The thread is fixed BEFORE the grant read, so the pending entry can be
+    // registered while the wallet is still working — otherwise a response that
+    // beats our own bookkeeping has nowhere to land.
+    const internal = filled;
 
     return new Promise<Message>((resolve, reject) => {
       const signal = opts?.signal;
@@ -689,19 +749,30 @@ export class Layr8Client extends EventEmitter {
         },
       });
 
-      this.safeEmit("outbound", internal);
-      channel.send("message", JSON.parse(marshalDIDComm(internal)))
-        .then((reply) => {
-          if (reply.status === "error") {
+      // Ordered with every other write on this Channel — `request` awaits the
+      // grant read too, so a caller who fires `request(A)` then `send(B)`
+      // without awaiting is entitled to A first. The server's acknowledgement
+      // is handled OUTSIDE the chain: a slow ack must not hold the next write.
+      this.ordered(channel, async () => {
+        const withVg = await this.withGrants(internal);
+        this.safeEmit("outbound", withVg);
+        channel.send("message", JSON.parse(marshalDIDComm(withVg)))
+          .then((reply) => {
+            if (reply.status === "error") {
+              cleanup();
+              reject(new ServerRejectError(reply.reason || reply.status));
+              return;
+            }
+          })
+          .catch((err) => {
             cleanup();
-            reject(new ServerRejectError(reply.reason || reply.status));
-            return;
-          }
-        })
-        .catch((err) => {
-          cleanup();
-          reject(err);
-        });
+            reject(err);
+          });
+      }).catch((err: unknown) => {
+        // Marshalling or the write itself failed before the server ever saw it.
+        cleanup();
+        reject(toError(err));
+      });
     });
   }
 
@@ -737,6 +808,7 @@ export class Layr8Client extends EventEmitter {
     }
 
     this.safeEmit("inbound", msg);
+    this.noteDenial(msg);
 
     const useReplyProtocol = channel.replyProtocol();
 
@@ -859,20 +931,44 @@ export class Layr8Client extends EventEmitter {
     }
   }
 
-  private sendReplyMessage(
+  /**
+   * A handler's reply is an ordinary outbound message, evaluated at the peer's
+   * node exactly like the request that prompted it — so it needs its grants
+   * attached, and this path did not have them. Wiring `send` and `request` and
+   * not this one leaves request/reply agents, the dominant pattern, as broken as
+   * before and now silently: the miss callback was bypassed too.
+   *
+   * The grant read happens BEFORE `ordered` here, where `send` and `request`
+   * both do it inside. That asymmetry is deliberate. Those two exist to honour
+   * the CALLER's sequence — an agent that fires `send(A)` then `send(B)` without
+   * awaiting is entitled to `[A, B]`, so the read has to sit inside the chain
+   * and the chain has to bound it (`Config.grantReadTimeoutMs`). A handler's
+   * reply has no such caller: it is dispatched from an inbound message, and
+   * there is no contract that reply-to-A precedes reply-to-B or precedes
+   * anything the application sends meanwhile. Reading outside the chain means a
+   * slow read here delays only its own reply, and the chain still serialises the
+   * WRITE so two replies cannot interleave on the wire.
+   */
+  private async sendReplyMessage(
     resp: Partial<Message>,
     original: InternalMessage,
     channel: Channel,
-  ): void {
+  ): Promise<void> {
     try {
-      const internal = this.fillMessageFrom(resp, channel.did);
-      if (!internal.to.length && original.from) {
-        internal.to = [original.from];
+      const filled = this.fillMessageFrom(resp, channel.did);
+      // The recipient is defaulted BEFORE the wallet runs. A handler's reply
+      // almost never names `to` — that is the whole point of replying — so
+      // consulting the wallet first asks it to cover an EMPTY recipient list,
+      // which nothing can, and the reply goes out bare. Silently: an empty
+      // covering set is a legitimate outcome everywhere else.
+      if (!filled.to.length && original.from) {
+        filled.to = [original.from];
       }
-      if (!internal.threadId) {
-        internal.threadId = original.threadId || original.id;
+      if (!filled.threadId) {
+        filled.threadId = original.threadId || original.id;
       }
-      this.sendMessageOnChannel(internal, channel);
+      const internal = await this.withGrants(filled);
+      await this.ordered(channel, () => this.sendMessageOnChannel(internal, channel));
     } catch (err) {
       this.onError(new SDKError(ErrorKind.TransportWrite, {
         messageId: original.id,
@@ -937,6 +1033,164 @@ export class Layr8Client extends EventEmitter {
       body: msg.body ?? null,
       ...(msg.attachments ? { attachments: msg.attachments } : {}),
     };
+  }
+
+  /**
+   * Attach the Verifiable Grants that cover this message.
+   *
+   * The node requires one for anything its policy does not allow outright, and
+   * nothing in this SDK attached any — there was no enforcement on outgoing
+   * requests because there was no mechanism. An agent connecting directly, on
+   * any protocol other than MCP through the broker, sent nothing and was denied
+   * with "no grant covers this call": a message that reads as "your grant is
+   * misconfigured" when the truth is "no credential was ever put on the wire".
+   *
+   * Caller-supplied attachments WIN and are never displaced — someone passing
+   * their own has a reason, and silently overriding it would be the second
+   * confusing thing to happen to that message.
+   *
+   * A wallet failure does NOT block the send. The node is the authority on
+   * whether this message needed a grant, and most traffic (discovery,
+   * trust-ping, problem reports) needs none; refusing here on a transient fetch
+   * error would take down calls that were never going to need us. The send
+   * proceeds unattached and `onGrantMiss` says so.
+   *
+   * "Does not block" has to hold for a read that HANGS, not just one that fails
+   * fast — a hang is the commoner production failure, and this await sits inside
+   * the per-channel write chain, so an unbounded one deadlocks the whole
+   * channel. The bound is `Config.grantReadTimeoutMs`, enforced on the request
+   * itself, and a timeout arrives here as an ordinary read error.
+   */
+  private async withGrants(msg: InternalMessage): Promise<InternalMessage> {
+    if (!this.wallet || msg.attachments?.length) return msg;
+
+    try {
+      const attachments = await this.wallet.attachmentsFor(
+        msg.from,
+        {
+          recipients: msg.to ?? [],
+          typeUri: msg.type,
+          body: msg.body,
+        },
+        // The cap left credentials off. Announced at once rather than remembered
+        // for a denial: unlike "nothing covered it", this is never the normal
+        // shape of a message that needs no grant, and the holding that triggers
+        // it will trigger it on every send until someone prunes the wallet.
+        (capped) => this.onGrantMiss?.({ to: msg.to ?? [], type: msg.type, capped }),
+      );
+
+      if (attachments.length > 0) {
+        return { ...msg, attachments };
+      }
+
+      // Nothing covered it — remembered, not announced.
+      //
+      // Announcing here fired on every message that legitimately needs no grant:
+      // discovery, trust-ping, problem reports. Measured: five plain pings from
+      // a client holding zero credentials produced five callbacks. For the
+      // majority of agents, which hold no grants at all, that is one line per
+      // outbound message — and a diagnostic that fires constantly is one nobody
+      // reads when it matters.
+      //
+      // The signal actually wanted is "the node denied, and we had attached
+      // nothing". That needs the denial, which arrives later — see
+      // `noteDenial`.
+      this.rememberUnattached(msg);
+      return msg;
+    } catch (err) {
+      // A read failure IS announced immediately: unlike "nothing covered it",
+      // it is never normal, and it means every subsequent send is flying blind.
+      this.onGrantMiss?.({ to: msg.to ?? [], type: msg.type, error: err });
+      return msg;
+    }
+  }
+
+  /**
+   * Evicted by AGE, not by count.
+   *
+   * A count cap dropped the entry that mattered. The denial for a message
+   * arrives within seconds of it, but the cap counted every unattached message
+   * in between — and `withGrants` records EVERY message it attaches nothing to,
+   * which for the agents this feature is aimed at (the ones holding no grants at
+   * all) is every discovery, trust-ping and problem report they send. Sixty-four
+   * of those between the send and its denial and `onGrantMiss` never fired: the
+   * one thing it exists for, lost to traffic that never needed a grant.
+   *
+   * Age bounds the map by SEND RATE × window instead, which is the honest bound
+   * — the entries are small and the window is short, and a burst large enough to
+   * matter would have to arrive inside it.
+   */
+  private rememberUnattached(msg: InternalMessage, now: number = Date.now()): void {
+    // Insertion order is chronological and `now` never goes backwards, so the
+    // stale entries are a prefix: stop at the first live one.
+    for (const [key, rec] of this.unattached) {
+      if (now - rec.at < UNATTACHED_WINDOW_MS) break;
+      this.unattached.delete(key);
+    }
+    // Delete first: re-setting an existing key keeps its ORIGINAL position, and
+    // one hot thread id refreshed in place would sit at the front with a fresh
+    // timestamp and stop the prefix scan above from ever reaching the stale
+    // entries behind it.
+    const key = msg.threadId || msg.id;
+    this.unattached.delete(key);
+    this.unattached.set(key, { at: now, to: msg.to ?? [], type: msg.type });
+  }
+
+  /**
+   * A problem report came back. If it is an authorization denial for a message
+   * we sent with nothing attached, that is the one case `onGrantMiss` exists
+   * for: the node names the grant it could not find, and only this side knows
+   * no credential was ever on the wire.
+   */
+  private noteDenial(msg: InternalMessage): void {
+    if (msg.type !== PROBLEM_REPORT_TYPE) return;
+
+    const body = ((msg.bodyRaw ?? msg.body) ?? {}) as Record<string, unknown>;
+    const code = typeof body.code === "string" ? body.code : "";
+    if (!code.includes("authz")) return;
+
+    // `parentThreadId` is the one that matches in production and it is SECOND
+    // only because a peer is free to use either. The node's own denial
+    // (`report_problem.ex`) sets `pthid` — to the denied message's `thid` or, for
+    // a message sent without one, its `id` — and sets no `thid` at all, so
+    // `msg.threadId` is empty on every real denial this SDK will see.
+    for (const key of [msg.threadId, msg.parentThreadId]) {
+      const hit = key ? this.unattached.get(key) : undefined;
+      if (hit) {
+        this.unattached.delete(key as string);
+        this.onGrantMiss?.({ to: hit.to, type: hit.type, denialCode: code });
+        return;
+      }
+    }
+  }
+
+  /**
+   * Outbound writes happen in CALL order, whatever the wallet does.
+   *
+   * Attaching put an `await` in front of every write, including the
+   * fire-and-forget branch that had none. Measured: `send(A)` then `send(B)`,
+   * with A's credential read the slower, arrived as `[B, A]`. Agents that emit a
+   * sequence without awaiting each call are entitled to their order, and a
+   * public SDK does not get to change that quietly.
+   *
+   * One chain per channel, so two DIDs do not block each other.
+   */
+  private ordered(channel: Channel, write: () => Promise<void> | void): Promise<void> {
+    const prev = this.writeChains.get(channel) ?? Promise.resolve();
+    // `write` runs whatever the previous one did — one failed send must not
+    // stop the channel.
+    const result = prev.then(write, write);
+    // What must NOT happen is returning a swallowed promise: `send()` on a
+    // dropped connection would resolve as though the message had gone out,
+    // which is the same class of silence this whole change is about. The caller
+    // gets `result` itself.
+    //
+    // Storing a settled-either-way copy is belt and braces — recovery already
+    // comes from `write` being the rejection handler above, and a mutation that
+    // stores `result` raw passes every test. It is kept so a later edit to
+    // `.then(write)` cannot leave a lone rejected promise parked in the map.
+    this.writeChains.set(channel, result.then(() => {}, () => {}));
+    return result;
   }
 
   private sendMessageOnChannel(msg: InternalMessage, channel: Channel): void {

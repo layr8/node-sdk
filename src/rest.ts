@@ -63,6 +63,15 @@ export class RESTError extends Error {
   }
 }
 
+/** Per-request options for the internal REST client. */
+export interface RequestOptions {
+  /**
+   * Give up after this many milliseconds of socket INACTIVITY — not of total
+   * elapsed time — rejecting with a timeout error and destroying the request.
+   */
+  timeoutMs?: number;
+}
+
 /** Internal REST client for the cloud-node HTTP API. */
 export class RestClient {
   private readonly baseUrl: string;
@@ -86,13 +95,21 @@ export class RestClient {
     return this.request<T>("POST", path, headers, data);
   }
 
-  /** Send a GET request and return the decoded response. */
-  async get<T>(path: string): Promise<T> {
+  /**
+   * Send a GET request and return the decoded response.
+   *
+   * `opts.timeoutMs` is a SOCKET INACTIVITY deadline, not a total one: a peer
+   * that keeps trickling bytes keeps resetting it. That covers the failure it
+   * is here for — a connection that is accepted and then silent — and it is the
+   * only form that can also destroy the socket. Opt-in, because a caller with
+   * no deadline of its own is better off waiting than cut off mid-answer.
+   */
+  async get<T>(path: string, opts?: RequestOptions): Promise<T> {
     const headers: Record<string, string> = {};
     if (this.apiKey) {
       headers["x-api-key"] = this.apiKey;
     }
-    return this.request<T>("GET", path, headers);
+    return this.request<T>("GET", path, headers, undefined, opts);
   }
 
   /** Execute an HTTP request using node:http with localhost resolution (RFC 6761). */
@@ -101,6 +118,7 @@ export class RestClient {
     path: string,
     headers: Record<string, string>,
     body?: string,
+    opts?: RequestOptions,
   ): Promise<T> {
     const parsed = new URL(this.baseUrl + path);
     const isHttps = parsed.protocol === "https:";
@@ -148,6 +166,21 @@ export class RestClient {
       );
 
       req.on("error", reject);
+
+      // A caller-supplied deadline, enforced on the SOCKET.
+      //
+      // `http.request` has NO default timeout: a peer that completes the TCP
+      // handshake and then says nothing leaves this promise pending forever,
+      // and forever is a long time to hold a socket and whatever is queued
+      // behind the caller. `setTimeout` alone only EMITS the event — the
+      // request stays open unless it is destroyed — so the handler destroys it
+      // with an error that names the deadline, rather than letting the caller
+      // read "socket hang up" and go looking for a network fault.
+      if (opts?.timeoutMs !== undefined && opts.timeoutMs > 0) {
+        req.setTimeout(opts.timeoutMs, () => {
+          req.destroy(new Error(`Request to ${path} timed out after ${opts.timeoutMs}ms`));
+        });
+      }
 
       if (body) {
         req.write(body);
