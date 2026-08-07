@@ -172,6 +172,18 @@ describe("grant attachment options", () => {
     expect(resolveConfig(base).grantCacheMs).toBe(DEFAULT_GRANT_CACHE_MS);
   });
 
+  it("treats an exported-but-empty cache TTL as unset, not as zero", () => {
+    // `Number("")` is 0, and 0 is a legitimate TTL meaning "never cache" — so
+    // the old parse turned an exported-but-empty variable into a credential read
+    // on EVERY message. Every other env setting here already treats empty as
+    // unset; this one now agrees with them.
+    process.env.LAYR8_GRANT_CACHE_MS = "";
+    expect(resolveConfig(base).grantCacheMs).toBe(DEFAULT_GRANT_CACHE_MS);
+
+    // Zero asked for EXPLICITLY still means what it says.
+    expect(resolveConfig({ ...base, grantCacheMs: 0 }).grantCacheMs).toBe(0);
+  });
+
   it("bounds the credential read, from config or the environment", () => {
     expect(resolveConfig(base).grantReadTimeoutMs).toBe(DEFAULT_GRANT_READ_TIMEOUT_MS);
     expect(resolveConfig({ ...base, grantReadTimeoutMs: 500 }).grantReadTimeoutMs).toBe(500);
