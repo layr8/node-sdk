@@ -6,6 +6,8 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-08-07
+
 ### Added
 
 - **Verifiable Grants are attached to outbound messages** — automatically, on
@@ -118,5 +120,6 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
 - 16 new tests under `tests/multi-did.test.ts` covering `joinDid` lifecycle (before connect, duplicate DID, primary-DID rejection, `leaveDid`, close-tears-down-all), inbound routing by topic (per-DID first, fallback to client-global, override priority, unrelated topic drops), `DidHandle.send` (writes to its own topic, stamps `from`), and three reconnect scenarios (rejoin every Channel after WS drops, isolated rejoin failure in multi-DID, single-DID rejoin failure retries the backoff loop).
 - 3 small test-bug fixes in `tests/client.test.ts` where the wrong topic literal (`plugin:lobby`, singular and incorrect) was masked by the old monolith's lack of topic routing. Updated to `plugins:<agentDid>` to match production.
 
+[0.2.2]: https://github.com/layr8/node-sdk/releases/tag/v0.2.2
 [0.2.1]: https://github.com/layr8/node-sdk/releases/tag/v0.2.1
 [0.2.0]: https://github.com/layr8/node-sdk/releases/tag/v0.2.0
