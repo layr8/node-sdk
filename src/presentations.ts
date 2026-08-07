@@ -1,5 +1,18 @@
 /**
  * W3C Verifiable Presentation types and option interfaces.
+ *
+ * These back `signPresentation` / `verifyPresentation` (see `client.ts`),
+ * which exist for proving credential possession to a VERIFIER — e.g. a REST
+ * caller checking proof of a credential. They are NOT the path for attaching
+ * a Verifiable Grant to an outbound DIDComm message. The cloud-node's
+ * authorization extractor accepts only attachments whose `media_type` is
+ * exactly `application/vc+jwt`; a presentation's `application/vp+jwt` is
+ * dropped before the data is even read, and the resulting denial is
+ * indistinguishable from attaching nothing.
+ *
+ * For authorization attachments, use `attachGrants` (default on — see
+ * `wallet.ts` and the README's "Verifiable Grants" section) rather than
+ * signing a presentation.
  */
 
 import type { CredentialFormat } from "./credentials.js";
