@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { createServer, type ServerResponse } from "node:http";
+import { describe, it, expect, vi, afterEach } from "vitest";
+import { ClientRequest, createServer, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 
 import { RestClient, restUrlFromWebSocket } from "../src/rest.js";
@@ -240,7 +240,9 @@ describe("the client-wide default deadline", () => {
 
   it("is turned off entirely by an explicit timeoutMs of 0", async () => {
     // `0` is not "no value given" — `??` keeps the two apart, where `||` would
-    // have turned the one way to opt out back into the default.
+    // have turned the one way to opt out back into the default. Discriminating
+    // because the client default here (60ms) is SHORTER than the server's
+    // 200ms: if `0` did not disable the deadline, this call would be cut off.
     const s = await slowServer(200);
     const client = new RestClient(s.url, "test-api-key", 60);
 
@@ -251,7 +253,12 @@ describe("the client-wide default deadline", () => {
     await s.close();
   });
 
-  it("also accepts 0 as the client-wide default", async () => {
+  it("still completes a normal call when the client default is 0", async () => {
+    // What this pins is only that a client-wide `0` does not BREAK a request.
+    // It cannot tell `0` apart from the 30s default — both let a 200ms call
+    // through, and no black-box test can separate them without waiting 30
+    // seconds. The test that actually holds that line is in "which deadline the
+    // client arms" below.
     const s = await slowServer(200);
     const client = new RestClient(s.url, "test-api-key", 0);
 
@@ -260,12 +267,17 @@ describe("the client-wide default deadline", () => {
     await s.close();
   });
 
-  it("leaves no timer armed on a pooled connection, across repeated calls", async () => {
+  it("survives repeated calls over one pooled connection", async () => {
     // `req.setTimeout` arms the SOCKET, and Node's global agent keeps sockets
-    // alive between requests. A deadline left behind on a socket returned to
-    // that pool would kill a LATER, healthy request — or the idle connection
-    // between two of them. Node clears the per-request callback when the
-    // response ends; this asserts it rather than trusting it.
+    // alive between requests, so the obvious worry is a deadline outliving its
+    // request and killing a later, healthy one.
+    //
+    // This is a characterization test for that arrangement — three calls and
+    // two idle gaps longer than the deadline, over a single TCP connection, all
+    // succeeding. It does NOT detect a leaked timer: a callback left behind
+    // would call `destroy` on a request that has already settled, which changes
+    // nothing observable here. The reasoning about why Node leaves nothing of
+    // ours on the socket, and the measurement behind it, is in `src/rest.ts`.
     const s = await slowServer(0);
     const client = new RestClient(s.url, "test-api-key", 80);
 
@@ -273,15 +285,71 @@ describe("the client-wide default deadline", () => {
       await expect(client.get(`/api/v1/credentials?n=${i}`)).resolves.toEqual({
         ok: true,
       });
-      // Idle for longer than the deadline. A leftover timer fires HERE.
+      // Idle for longer than the deadline, which is when a socket the agent had
+      // left armed at OUR value would be torn down under us.
       await new Promise<void>((r) => setTimeout(r, 120));
     }
 
-    // The whole test is vacuous unless the connection really was reused: three
-    // requests over one TCP connection is what puts a stale timer in reach.
+    // The arrangement under test is connection REUSE — without this the three
+    // calls are three unrelated connections and the test says nothing at all.
     expect(s.requests()).toBe(3);
     expect(s.connections()).toBe(1);
 
     await s.close();
+  });
+});
+
+describe("which deadline the client arms", () => {
+  // The gap this closes: `restTimeoutMs: 0` and the 30s default are
+  // indistinguishable from the outside for the first 30 seconds, so every
+  // black-box test above passes whether or not a client-wide `0` is honoured.
+  // A mutation that quietly rewrote `0` to the default (`defaultTimeoutMs ||
+  // DEFAULT_REST_TIMEOUT_MS`) left the entire suite green.
+  //
+  // So assert the DECISION rather than its consequence: whether a socket
+  // deadline was armed at all, and with what value. `0` disabling the deadline
+  // is a documented escape hatch in both the README and the CHANGELOG, and this
+  // is what holds callers to it.
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** The deadlines `run` actually armed on the socket, in order. */
+  async function armed(
+    defaultTimeoutMs: number,
+    run: (client: RestClient) => Promise<unknown>,
+  ): Promise<number[]> {
+    const s = await slowServer(0);
+    const spy = vi.spyOn(ClientRequest.prototype, "setTimeout");
+    const client = new RestClient(s.url, "test-api-key", defaultTimeoutMs);
+
+    await run(client);
+
+    const values = spy.mock.calls.map((call) => call[0]);
+    await s.close();
+    return values;
+  }
+
+  it("arms the client default when the call brings none", async () => {
+    expect(await armed(60, (c) => c.get("/api/v1/credentials"))).toEqual([60]);
+    expect(await armed(60, (c) => c.post("/api/v1/credentials/sign", {}))).toEqual([60]);
+  });
+
+  it("arms NOTHING when the client default is 0", async () => {
+    expect(await armed(0, (c) => c.get("/api/v1/credentials"))).toEqual([]);
+    expect(await armed(0, (c) => c.post("/api/v1/credentials/sign", {}))).toEqual([]);
+  });
+
+  it("arms NOTHING when the call passes 0, whatever the client default", async () => {
+    expect(
+      await armed(60, (c) => c.get("/api/v1/credentials", { timeoutMs: 0 })),
+    ).toEqual([]);
+  });
+
+  it("arms the per-call value when the call brings one", async () => {
+    expect(
+      await armed(60, (c) => c.get("/api/v1/credentials", { timeoutMs: 5_000 })),
+    ).toEqual([5_000]);
   });
 });

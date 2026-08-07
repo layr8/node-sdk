@@ -336,14 +336,14 @@ that is merely slow looks exactly like a node that has stopped.
 So each of those methods takes a per-call `timeoutMs` that overrides the default:
 
 ```typescript
+// Raise it for the whole client (`0` means unbounded, as it did before).
+const client = new Layr8Client(logErrors(), { restTimeoutMs: 60_000 });
+
 // This issuer signs a large credential on a busy node: give it room.
 const signed = await client.signCredential(credential, { timeoutMs: 120_000 });
 
 // No deadline at all for this one call.
 const listed = await client.listCredentials({ timeoutMs: 0 });
-
-// Or lift it for the whole client (`0` means unbounded, as it did before).
-const client = new Layr8Client(logErrors(), { restTimeoutMs: 60_000 });
 ```
 
 `0` disables the deadline; leaving `timeoutMs` out (or `undefined`) uses the

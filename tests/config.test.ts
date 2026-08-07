@@ -248,6 +248,61 @@ describe("the REST deadline", () => {
   });
 });
 
+describe("an impossible value in explicit config", () => {
+  // The range each of these settings documents used to be enforced against the
+  // ENVIRONMENT only: `envMs` returned an explicit value untouched. So the one
+  // place a bad number really comes from went unchecked —
+  //
+  //   new Layr8Client(logErrors(), { restTimeoutMs: Number(process.env.MY_TIMEOUT) })
+  //
+  // — which is `NaN` when the variable is unset. `NaN` failed every `> 0`
+  // comparison downstream and silently restored the unbounded behaviour these
+  // deadlines exist to remove, with nothing thrown and nothing logged.
+  const base = { nodeUrl: "ws://localhost:4000", apiKey: "test-api-key" };
+
+  it("falls back rather than letting NaN through", () => {
+    expect(resolveConfig({ ...base, restTimeoutMs: NaN }).restTimeoutMs).toBe(
+      DEFAULT_REST_TIMEOUT_MS,
+    );
+    expect(resolveConfig({ ...base, grantReadTimeoutMs: NaN }).grantReadTimeoutMs).toBe(
+      DEFAULT_GRANT_READ_TIMEOUT_MS,
+    );
+    // Left alone, a NaN cache TTL re-reads the credentials on EVERY message.
+    expect(resolveConfig({ ...base, grantCacheMs: NaN }).grantCacheMs).toBe(
+      DEFAULT_GRANT_CACHE_MS,
+    );
+  });
+
+  it("falls back rather than accepting a negative duration", () => {
+    expect(resolveConfig({ ...base, restTimeoutMs: -1 }).restTimeoutMs).toBe(
+      DEFAULT_REST_TIMEOUT_MS,
+    );
+    expect(resolveConfig({ ...base, grantReadTimeoutMs: -1 }).grantReadTimeoutMs).toBe(
+      DEFAULT_GRANT_READ_TIMEOUT_MS,
+    );
+    expect(resolveConfig({ ...base, grantCacheMs: -1 }).grantCacheMs).toBe(
+      DEFAULT_GRANT_CACHE_MS,
+    );
+  });
+
+  it("treats an explicit zero by each setting's own rule", () => {
+    // Not one rule for all three — each `min` says what zero means here.
+
+    // A deadline of nothing on the REST calls: legitimate, it is the opt-out.
+    expect(resolveConfig({ ...base, restTimeoutMs: 0 }).restTimeoutMs).toBe(0);
+
+    // Never cache a grant: legitimate, re-read on every message.
+    expect(resolveConfig({ ...base, grantCacheMs: 0 }).grantCacheMs).toBe(0);
+
+    // A zero grant-read deadline would abort every read before it began and
+    // attach nothing at all. `min` is 1 for that reason, and now that bound
+    // holds from config as well as from the environment.
+    expect(resolveConfig({ ...base, grantReadTimeoutMs: 0 }).grantReadTimeoutMs).toBe(
+      DEFAULT_GRANT_READ_TIMEOUT_MS,
+    );
+  });
+});
+
 describe("what a caller can WRITE against", () => {
   // A compile-time claim, not a runtime one. `Config.onGrantMiss` was declared
   // without `denialCode` while the client passed it and the README's example

@@ -198,11 +198,22 @@ export class RestClient {
       // means "no deadline at all", and `0 || 30000` would silently turn the
       // one explicit way to opt out into the default.
       //
-      // No teardown is needed when the response arrives. Node clears the
-      // per-request timeout callback off the socket before returning it to the
-      // agent's keep-alive pool, so a deadline set here cannot fire on a later
-      // request that reuses the connection. Verified, not assumed — see the
-      // "leaves no timer armed on a pooled connection" test.
+      // No teardown is needed when the response arrives, and the reason is
+      // worth stating exactly, because "the socket ends up with no timer" would
+      // be wrong. Measured on Node v20.19.5, inspecting the socket directly:
+      //
+      //   at response end : socket.timeout = 0,    our callback removed
+      //   parked in pool  : socket.timeout = 4000, agent's own `onTimeout`
+      //
+      // So Node does drop THIS request's callback when the response ends — that
+      // is what makes a deadline set here unable to fire on a later request over
+      // the same connection — and the agent then arms its own idle timeout in
+      // its place. The socket is never untimed; it is simply no longer ours.
+      //
+      // This is a claim about Node's internals, not about code in this repo, so
+      // no test in this suite proves it: a callback left behind would fire
+      // `destroy` on a request that has already settled, which is invisible from
+      // the outside. It is here as a record of what was observed, dated.
       const timeoutMs = opts?.timeoutMs ?? this.defaultTimeoutMs;
       if (timeoutMs > 0) {
         req.setTimeout(timeoutMs, () => {

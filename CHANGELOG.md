@@ -25,6 +25,24 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
   that one call unbounded. `restTimeoutMs: 0` restores the previous behaviour
   everywhere.
 
+### Fixed
+
+- An out-of-range `grantCacheMs`, `grantReadTimeoutMs` or `restTimeoutMs` passed
+  in **config** now falls back to the default, as one from the environment
+  already did. The range check sat only on the environment branch, so the
+  documented bounds were enforced against operators and not against callers —
+  and the caller is where a bad value actually comes from:
+  `{ restTimeoutMs: Number(process.env.MY_TIMEOUT) }` is `NaN` when the variable
+  is unset, and `NaN` passed straight through, failed every comparison
+  downstream, and silently left the calls unbounded.
+
+  Two consequences worth naming, both of them the code finally doing what its
+  own documentation said: an explicit `grantReadTimeoutMs: 0` now falls back to
+  2s instead of disabling the read deadline (zero was already refused from the
+  environment, for the reason that a zero deadline aborts every read before it
+  starts), and an explicit `grantCacheMs: NaN` now falls back to 60s instead of
+  re-reading the credentials on every message. Defaults and bounds are unchanged.
+
 ## [0.2.2] - 2026-08-07
 
 ### Added

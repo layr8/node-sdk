@@ -259,7 +259,9 @@ export function resolveConfig(cfg: Config): ResolvedConfig {
     // Zero is not accepted here, unlike the cache TTL where it means "never
     // cache": a zero deadline would abort every read before it started, turning
     // a mistyped variable into an agent that attaches nothing at all — the exact
-    // failure this whole feature exists to end.
+    // failure this whole feature exists to end. `min` now binds an explicitly
+    // configured zero as well, not just an env one; the rule this comment
+    // describes was only ever half enforced.
     grantReadTimeoutMs: envMs(
       cfg.grantReadTimeoutMs,
       process.env.LAYR8_GRANT_READ_TIMEOUT_MS,
@@ -283,9 +285,21 @@ export function resolveConfig(cfg: Config): ResolvedConfig {
 /**
  * A millisecond setting, from the explicit config or the environment.
  *
- * A non-numeric or out-of-range env value is IGNORED rather than turned into
- * `NaN`, which would make every comparison false and re-read the credentials on
- * EVERY message — a typo becoming a load problem nobody would connect to it.
+ * A non-numeric or out-of-range value is IGNORED rather than turned into `NaN`,
+ * which would make every comparison false and re-read the credentials on EVERY
+ * message — a typo becoming a load problem nobody would connect to it.
+ *
+ * `min` binds the EXPLICIT value too, which it did not before. The check used to
+ * sit only on the env branch, so the range each setting documents was enforced
+ * against operators and not against callers — and the caller is where the bad
+ * value actually comes from:
+ *
+ *     new Layr8Client(logErrors(), { restTimeoutMs: Number(process.env.MY_TIMEOUT) })
+ *
+ * With `MY_TIMEOUT` unset that is `NaN`, which passed straight through, failed
+ * `NaN > 0`, and silently returned every REST call to the unbounded state this
+ * deadline exists to end. No throw, no warning, nothing in a log. An impossible
+ * value now falls back to the documented default from either direction.
  */
 function envMs(
   explicit: number | undefined,
@@ -293,7 +307,9 @@ function envMs(
   fallback: number,
   min = 0,
 ): number {
-  if (explicit !== undefined) return explicit;
+  if (explicit !== undefined) {
+    return Number.isFinite(explicit) && explicit >= min ? explicit : fallback;
+  }
   const n = Number(raw);
   return raw !== undefined && raw.trim() !== "" && Number.isFinite(n) && n >= min ? n : fallback;
 }
