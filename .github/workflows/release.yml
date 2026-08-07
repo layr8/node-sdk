@@ -11,6 +11,24 @@ on:
         description: "Version to (re-)publish, without the leading v (e.g. 0.2.0)"
         required: true
 
+# GitHub-hosted runners, not the self-hosted `layr8-eks-runners` fleet.
+#
+# This workflow was moved to the self-hosted fleet in PR #44 alongside
+# ci.yaml, during a GitHub Actions hosted-runner outage. It needs to move
+# back for the same reason ci.yaml did: this repository is public, and
+# GitHub's org-level "Allow public repositories to use self-hosted runners"
+# setting is off by default and off for this org, so self-hosted jobs on a
+# public repo never get an eligible runner. Measured impact on this fleet:
+# ci.yaml's jobs queued 20+ minutes with no runner picking them up on this
+# public repo (PR #43), while the identical fleet served a private repo
+# (layr8/agents PR #225) normally.
+#
+# Both triggers here (`release: published`, `workflow_dispatch`) require
+# write access to this repository, so there is no fork path to guard against
+# — that's not why this needs fixing. The org-level block is keyed on repo
+# visibility plus self-hosted, not on how the workflow was triggered, so
+# leaving `runs-on` pointed at the self-hosted fleet here would just queue
+# indefinitely the same way, and this repo is about to cut v0.2.2.
 permissions:
   contents: read
 
