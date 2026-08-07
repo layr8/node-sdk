@@ -10,6 +10,7 @@ import type {
   StoreCredentialOptions,
   StoredCredential,
   ListCredentialsOptions,
+  GetCredentialOptions,
 } from "./credentials.js";
 import type {
   SignPresentationOptions,
@@ -44,7 +45,13 @@ function toError(err: unknown): Error {
   return err instanceof Error ? err : new Error(String(err));
 }
 
-/** Options for request(). */
+/**
+ * Options for request() — the DIDComm request/response one.
+ *
+ * Not to be confused with `RestRequestOptions` in `rest.ts`, which carries the
+ * deadline for the HTTP credential and presentation calls. This one's deadline
+ * is `signal`.
+ */
 export interface RequestOptions {
   /** Set pthid for nested thread correlation. */
   parentThread?: string;
@@ -200,6 +207,7 @@ export class Layr8Client extends EventEmitter {
     this.rest = new RestClient(
       restUrlFromWebSocket(this.cfg.nodeUrl),
       this.cfg.apiKey,
+      this.cfg.restTimeoutMs,
     );
     // On by default. A grant the node requires and the SDK does not attach is
     // indistinguishable, from the caller's side, from a grant that was never
@@ -520,6 +528,12 @@ export class Layr8Client extends EventEmitter {
   }
 
   // --- W3C Verifiable Credential APIs (REST, no WebSocket required) ---
+  //
+  // Each of these takes an optional `timeoutMs`, and each falls back to
+  // `Config.restTimeoutMs` (30s) when it is not given. The deadline is on
+  // socket INACTIVITY, so the node's own signing time counts against it — the
+  // per-call option is how a caller that knows a call is slow buys more room,
+  // or with `0` opts out of the deadline for that call alone.
 
   /**
    * Sign a W3C Verifiable Credential using the issuer's assertion key.
@@ -538,6 +552,7 @@ export class Layr8Client extends EventEmitter {
     const result = await this.rest.post<{ signed_credential: string }>(
       "/api/v1/credentials/sign",
       body,
+      { timeoutMs: options?.timeoutMs },
     );
     return result.signed_credential;
   }
@@ -558,6 +573,7 @@ export class Layr8Client extends EventEmitter {
     return this.rest.post<VerifiedCredential>(
       "/api/v1/credentials/verify",
       body,
+      { timeoutMs: options?.timeoutMs },
     );
   }
 
@@ -580,7 +596,9 @@ export class Layr8Client extends EventEmitter {
       body.valid_until = options.validUntil.toISOString();
     }
 
-    return this.rest.post<StoredCredential>("/api/v1/credentials", body);
+    return this.rest.post<StoredCredential>("/api/v1/credentials", body, {
+      timeoutMs: options?.timeoutMs,
+    });
   }
 
   /**
@@ -596,14 +614,18 @@ export class Layr8Client extends EventEmitter {
 
     const result = await this.rest.get<{ credentials: StoredCredential[] }>(
       path,
+      { timeoutMs: options?.timeoutMs },
     );
     return result.credentials;
   }
 
   /** Retrieve a stored credential by ID. */
-  async getCredential(credentialId: string): Promise<StoredCredential> {
+  async getCredential(
+    credentialId: string,
+    options?: GetCredentialOptions,
+  ): Promise<StoredCredential> {
     const path = "/api/v1/credentials/" + encodeURIComponent(credentialId);
-    return this.rest.get<StoredCredential>(path);
+    return this.rest.get<StoredCredential>(path, { timeoutMs: options?.timeoutMs });
   }
 
   // --- W3C Verifiable Presentation APIs (REST, no WebSocket required) ---
@@ -629,6 +651,7 @@ export class Layr8Client extends EventEmitter {
     const result = await this.rest.post<{ signed_presentation: string }>(
       "/api/v1/presentations/sign",
       body,
+      { timeoutMs: options?.timeoutMs },
     );
     return result.signed_presentation;
   }
@@ -649,6 +672,7 @@ export class Layr8Client extends EventEmitter {
     return this.rest.post<VerifiedPresentation>(
       "/api/v1/presentations/verify",
       body,
+      { timeoutMs: options?.timeoutMs },
     );
   }
 

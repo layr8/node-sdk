@@ -6,6 +6,25 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
 
 ## [Unreleased]
 
+### Added
+
+- `restTimeoutMs` (default 30s, env `LAYR8_REST_TIMEOUT_MS`) — a deadline on
+  **every** credential and presentation call, plus a per-call `timeoutMs` on each
+  of them. `grantReadTimeoutMs` bounded the grant read and nothing else:
+  `signCredential`, `verifyCredential`, `storeCredential`, `listCredentials`,
+  `getCredential`, `signPresentation` and `verifyPresentation` still had no
+  deadline at all, and `http.request` has none of its own, so a node that
+  accepted the connection and went quiet left those promises pending forever —
+  neither resolving nor rejecting, and never letting the caller reach the point
+  of deciding to retry.
+
+  The deadline is on socket **inactivity**, not total elapsed time, which is what
+  lets it catch a silent connection — and also means the node's own signing time
+  counts against it, since nothing flows on the wire while it computes. Hence the
+  escape hatch: pass `timeoutMs` on the call you know is slow, or `0` to make
+  that one call unbounded. `restTimeoutMs: 0` restores the previous behaviour
+  everywhere.
+
 ## [0.2.2] - 2026-08-07
 
 ### Added

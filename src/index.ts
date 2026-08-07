@@ -46,6 +46,11 @@ export type { ServerReply } from "./channel.js";
 
 // REST client
 export { RESTError } from "./rest.js";
+// The per-call deadline every credential/presentation option type carries. The
+// name says REST on purpose: `RequestOptions` above is the DIDComm one, and a
+// caller reaching for a timeout should not have to guess which of two
+// same-named types it landed on.
+export type { RestRequestOptions } from "./rest.js";
 
 // W3C Verifiable Credential types
 export type {
@@ -57,6 +62,7 @@ export type {
   VerifyCredentialOptions,
   StoreCredentialOptions,
   ListCredentialsOptions,
+  GetCredentialOptions,
 } from "./credentials.js";
 
 // W3C Verifiable Presentation types

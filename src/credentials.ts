@@ -2,6 +2,8 @@
  * W3C Verifiable Credential types and option interfaces.
  */
 
+import type { RestRequestOptions } from "./rest.js";
+
 /** CredentialFormat controls the signed credential output encoding. */
 export type CredentialFormat = "compact_jwt" | "json" | "jwt" | "enveloped";
 
@@ -31,8 +33,18 @@ export interface StoredCredential {
   valid_until?: string;
 }
 
-/** Options for signCredential. */
-export interface SignCredentialOptions {
+// Every option type below extends `RestRequestOptions`, so `timeoutMs` is
+// defined ONCE — with the explanation of what it is measured on — instead of
+// being restated six times and drifting.
+
+/**
+ * Options for signCredential.
+ *
+ * Signing is the call most likely to want a longer `timeoutMs` than the 30s
+ * default: the node produces no bytes while it works, so that time reads as
+ * silence to the deadline.
+ */
+export interface SignCredentialOptions extends RestRequestOptions {
   /** Override the issuer DID (defaults to client.did). */
   issuerDid?: string;
   /** Output format (defaults to "compact_jwt"). */
@@ -40,13 +52,13 @@ export interface SignCredentialOptions {
 }
 
 /** Options for verifyCredential. */
-export interface VerifyCredentialOptions {
+export interface VerifyCredentialOptions extends RestRequestOptions {
   /** Override the verifier DID (defaults to client.did). */
   verifierDid?: string;
 }
 
 /** Options for storeCredential. */
-export interface StoreCredentialOptions {
+export interface StoreCredentialOptions extends RestRequestOptions {
   /** Override the holder DID (defaults to client.did). */
   holderDid?: string;
   /** Optional issuer DID metadata. */
@@ -56,7 +68,17 @@ export interface StoreCredentialOptions {
 }
 
 /** Options for listCredentials. */
-export interface ListCredentialsOptions {
+export interface ListCredentialsOptions extends RestRequestOptions {
   /** Override the holder DID (defaults to client.did). */
   holderDid?: string;
 }
+
+/**
+ * Options for getCredential.
+ *
+ * The call takes an ID and nothing else, so this exists only to carry
+ * `timeoutMs` — named and exported anyway, because every other REST method on
+ * the client has a named options type and an inline `{ timeoutMs?: number }`
+ * would be the one a caller cannot import to build.
+ */
+export interface GetCredentialOptions extends RestRequestOptions {}

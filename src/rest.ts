@@ -10,6 +10,8 @@
 import http from "node:http";
 import https from "node:https";
 
+import { DEFAULT_REST_TIMEOUT_MS } from "./config.js";
+
 /** Check whether a hostname is localhost or a subdomain of it (RFC 6761). */
 function isLocalhost(hostname: string): boolean {
   return hostname === "localhost" || hostname.endsWith(".localhost");
@@ -63,11 +65,27 @@ export class RESTError extends Error {
   }
 }
 
-/** Per-request options for the internal REST client. */
-export interface RequestOptions {
+/**
+ * Per-request options for a REST call.
+ *
+ * Named for the transport, not for `client.request()` — `RequestOptions` in
+ * `client.ts` is the DIDComm request/response one, and two identically named
+ * types describing unrelated things is how a caller ends up setting a field the
+ * other one would have honoured.
+ */
+export interface RestRequestOptions {
   /**
    * Give up after this many milliseconds of socket INACTIVITY — not of total
    * elapsed time — rejecting with a timeout error and destroying the request.
+   *
+   * Overrides the client-wide default (`Config.restTimeoutMs`, 30s). `0`
+   * disables the deadline for this call: the escape hatch for a call that is
+   * expected to be slow, not an implementation detail.
+   *
+   * Inactivity is the whole point and also the sharp edge: while the node signs
+   * or verifies, no bytes flow, so a genuinely slow sign counts as silence and
+   * will hit the default. Raise it on THAT call rather than lifting the
+   * deadline everywhere.
    */
   timeoutMs?: number;
 }
@@ -76,14 +94,21 @@ export interface RequestOptions {
 export class RestClient {
   private readonly baseUrl: string;
   private readonly apiKey: string;
+  private readonly defaultTimeoutMs: number;
 
-  constructor(baseUrl: string, apiKey: string) {
+  constructor(
+    baseUrl: string,
+    apiKey: string,
+    /** Deadline applied to any call that does not carry its own — see `Config.restTimeoutMs`. */
+    defaultTimeoutMs: number = DEFAULT_REST_TIMEOUT_MS,
+  ) {
     this.baseUrl = baseUrl;
     this.apiKey = apiKey;
+    this.defaultTimeoutMs = defaultTimeoutMs;
   }
 
   /** Send a JSON POST request and return the decoded response. */
-  async post<T>(path: string, body: unknown): Promise<T> {
+  async post<T>(path: string, body: unknown, opts?: RestRequestOptions): Promise<T> {
     const data = JSON.stringify(body);
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
@@ -92,19 +117,11 @@ export class RestClient {
     if (this.apiKey) {
       headers["x-api-key"] = this.apiKey;
     }
-    return this.request<T>("POST", path, headers, data);
+    return this.request<T>("POST", path, headers, data, opts);
   }
 
-  /**
-   * Send a GET request and return the decoded response.
-   *
-   * `opts.timeoutMs` is a SOCKET INACTIVITY deadline, not a total one: a peer
-   * that keeps trickling bytes keeps resetting it. That covers the failure it
-   * is here for — a connection that is accepted and then silent — and it is the
-   * only form that can also destroy the socket. Opt-in, because a caller with
-   * no deadline of its own is better off waiting than cut off mid-answer.
-   */
-  async get<T>(path: string, opts?: RequestOptions): Promise<T> {
+  /** Send a GET request and return the decoded response. */
+  async get<T>(path: string, opts?: RestRequestOptions): Promise<T> {
     const headers: Record<string, string> = {};
     if (this.apiKey) {
       headers["x-api-key"] = this.apiKey;
@@ -118,7 +135,7 @@ export class RestClient {
     path: string,
     headers: Record<string, string>,
     body?: string,
-    opts?: RequestOptions,
+    opts?: RestRequestOptions,
   ): Promise<T> {
     const parsed = new URL(this.baseUrl + path);
     const isHttps = parsed.protocol === "https:";
@@ -167,7 +184,7 @@ export class RestClient {
 
       req.on("error", reject);
 
-      // A caller-supplied deadline, enforced on the SOCKET.
+      // The deadline, enforced on the SOCKET.
       //
       // `http.request` has NO default timeout: a peer that completes the TCP
       // handshake and then says nothing leaves this promise pending forever,
@@ -176,9 +193,20 @@ export class RestClient {
       // request stays open unless it is destroyed — so the handler destroys it
       // with an error that names the deadline, rather than letting the caller
       // read "socket hang up" and go looking for a network fault.
-      if (opts?.timeoutMs !== undefined && opts.timeoutMs > 0) {
-        req.setTimeout(opts.timeoutMs, () => {
-          req.destroy(new Error(`Request to ${path} timed out after ${opts.timeoutMs}ms`));
+      //
+      // `??`, never `||`: `undefined` means "use the client's default", `0`
+      // means "no deadline at all", and `0 || 30000` would silently turn the
+      // one explicit way to opt out into the default.
+      //
+      // No teardown is needed when the response arrives. Node clears the
+      // per-request timeout callback off the socket before returning it to the
+      // agent's keep-alive pool, so a deadline set here cannot fire on a later
+      // request that reuses the connection. Verified, not assumed — see the
+      // "leaves no timer armed on a pooled connection" test.
+      const timeoutMs = opts?.timeoutMs ?? this.defaultTimeoutMs;
+      if (timeoutMs > 0) {
+        req.setTimeout(timeoutMs, () => {
+          req.destroy(new Error(`Request to ${path} timed out after ${timeoutMs}ms`));
         });
       }
 

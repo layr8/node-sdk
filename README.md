@@ -236,6 +236,8 @@ Configuration can be set explicitly or via environment variables. Environment va
 | `agentDid` | `LAYR8_AGENT_DID` | Yes | Agent DID identity |
 | `attachGrants` | `LAYR8_ATTACH_GRANTS` | No | Attach covering Verifiable Grants to outbound messages (default `true`) — see [Verifiable Grants](#verifiable-grants) |
 | `grantCacheMs` | `LAYR8_GRANT_CACHE_MS` | No | How long held grants are cached before re-reading (default `60000`) |
+| `grantReadTimeoutMs` | `LAYR8_GRANT_READ_TIMEOUT_MS` | No | Deadline on the grant read that precedes a send (default `2000`) — see [If the node stops answering](#if-the-node-stops-answering) |
+| `restTimeoutMs` | `LAYR8_REST_TIMEOUT_MS` | No | Deadline on every credential/presentation REST call (default `30000`, `0` disables) — see [Deadlines on the credential APIs](#deadlines-on-the-credential-apis) |
 | `onGrantMiss` | — | No | Called when the node denies a message you sent with no grant attached |
 
 `agentDid` is required — set it explicitly or via `LAYR8_AGENT_DID`. It's the DID your agent connects as and the address other agents use to message it; the cloud-node rejects a connection that doesn't specify one. Retrieve the active DID at runtime with `client.did`.
@@ -308,6 +310,46 @@ The deadline is not optional politeness. The read runs inside the per-channel
 write chain, which is what keeps outbound writes in call order, so an unbounded
 read would stall every later send on that channel — including ones that carry
 their own attachments and never consult the wallet.
+
+The same applies to every other call this SDK makes over HTTP — see
+[Deadlines on the credential APIs](#deadlines-on-the-credential-apis).
+
+### Deadlines on the credential APIs
+
+Every credential and presentation call — `signCredential`, `verifyCredential`,
+`storeCredential`, `listCredentials`, `getCredential`, `signPresentation`,
+`verifyPresentation` — is bounded by `restTimeoutMs` (**30s by default**, env
+`LAYR8_REST_TIMEOUT_MS`).
+
+There is a default because the alternative is not "waiting". Node's
+`http.request` has no timeout of its own, so a node that accepts the TCP
+connection and then goes quiet leaves the returned promise pending **forever**:
+it never resolves, never rejects, and never gives you the one thing you could act
+on — the knowledge that the answer is not coming.
+
+**The deadline is on socket inactivity, not on total elapsed time.** A peer that
+keeps sending bytes keeps resetting it. That is what makes it able to catch a
+silent connection at all — but it also means the node's own signing time counts
+against it, because nothing flows on the wire while the node computes. A sign
+that is merely slow looks exactly like a node that has stopped.
+
+So each of those methods takes a per-call `timeoutMs` that overrides the default:
+
+```typescript
+// This issuer signs a large credential on a busy node: give it room.
+const signed = await client.signCredential(credential, { timeoutMs: 120_000 });
+
+// No deadline at all for this one call.
+const listed = await client.listCredentials({ timeoutMs: 0 });
+
+// Or lift it for the whole client (`0` means unbounded, as it did before).
+const client = new Layr8Client(logErrors(), { restTimeoutMs: 60_000 });
+```
+
+`0` disables the deadline; leaving `timeoutMs` out (or `undefined`) uses the
+client default. Raise it on the call you know is slow rather than removing it
+everywhere — an unbounded call should be something you asked for, not something
+you got by forgetting.
 
 ### A grant issued just now
 
@@ -604,6 +646,10 @@ console.log(fetched.credential_jwt); // the original signed JWT
 
 Store options: `{ holderDid, issuerDid, validUntil }`.
 List options: `{ holderDid }`.
+Get options: `{ timeoutMs }`.
+
+Every one of these also takes `timeoutMs` — see
+[Deadlines on the credential APIs](#deadlines-on-the-credential-apis).
 
 ### Output Formats
 
@@ -632,6 +678,11 @@ console.log(verified.headers);      // JWT headers
 ```
 
 Options: `{ verifierDid }`.
+
+Both also take `timeoutMs` — see
+[Deadlines on the credential APIs](#deadlines-on-the-credential-apis). Signing a
+presentation is the same kind of silent compute on the node that signing a
+credential is.
 
 ## Examples
 
