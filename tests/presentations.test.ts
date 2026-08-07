@@ -137,3 +137,30 @@ describe("verifyPresentation", () => {
     });
   });
 });
+
+describe("the per-call deadline reaches the wire", () => {
+  // Same claim as in credentials.test.ts, for the two presentation calls: a
+  // `timeoutMs` the method accepts and drops leaves the caller believing a call
+  // is bounded when it is not.
+
+  it("bounds every presentation call it is passed to", async () => {
+    const parked: ServerResponse[] = [];
+    const { url, server } = await startMockServer((_req, res) => {
+      parked.push(res);
+    });
+    server.on("close", () => {
+      for (const res of parked) res.destroy();
+    });
+    activeServer = server;
+
+    const client = newTestClient(url);
+    const deadline = /timed out after 60ms/;
+
+    await expect(
+      client.signPresentation(["jwt-data"], { timeoutMs: 60 }),
+    ).rejects.toThrow(deadline);
+    await expect(
+      client.verifyPresentation("jwt-data", { timeoutMs: 60 }),
+    ).rejects.toThrow(deadline);
+  });
+});

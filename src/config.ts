@@ -118,6 +118,23 @@ export interface Config {
    */
   grantReadTimeoutMs?: number;
   /**
+   * Deadline on every REST call the client makes. Default 30s.
+   * Fallback: LAYR8_REST_TIMEOUT_MS env.
+   *
+   * Node's `http.request` has no default timeout, so without this a node that
+   * accepts the TCP connection and then says nothing leaves `signCredential`,
+   * `verifyCredential`, `storeCredential`, `listCredentials`, `getCredential`,
+   * `signPresentation` and `verifyPresentation` pending FOREVER — never
+   * resolving, never rejecting, and never giving the caller the one thing it
+   * could act on: the knowledge that the call is not coming back.
+   *
+   * Set `0` to disable the deadline for every call. Individual calls override
+   * it with their own `timeoutMs` option, which is the escape hatch a slow sign
+   * should use — see `DEFAULT_REST_TIMEOUT_MS` for why signing is the case that
+   * needs one.
+   */
+  restTimeoutMs?: number;
+  /**
    * Called when a message went out with NO covering grant, when the covering
    * set had to be capped, or when the grants could not be read.
    *
@@ -138,6 +155,7 @@ export interface ResolvedConfig {
   attachGrants: boolean;
   grantCacheMs: number;
   grantReadTimeoutMs: number;
+  restTimeoutMs: number;
 }
 
 /** Default grant cache TTL. Short: a grant minted seconds ago is invisible until it lapses. */
@@ -162,6 +180,27 @@ export const DEFAULT_GRANT_CACHE_MS = 60_000;
  * least as long as this value so raising it does not silently undo the first.
  */
 export const DEFAULT_GRANT_READ_TIMEOUT_MS = 2_000;
+
+/**
+ * Default deadline on every REST call.
+ *
+ * Thirty seconds, and the number matters less than what it is measured on: this
+ * is a deadline on socket INACTIVITY, not on total elapsed time. While the node
+ * signs or verifies a credential, no bytes flow — that work is indistinguishable
+ * on the wire from a node that has stopped answering — so this WILL cut off a
+ * sign that is merely slow. That is the trade, taken deliberately:
+ *
+ * - 30s is far above any honest sign, verify, or credential list against a node
+ *   this client already holds a WebSocket to; and
+ * - it is far below any duration a person watching would still call "working"
+ *   rather than "hung".
+ *
+ * A caller who knows better raises it per call with `timeoutMs`, or passes `0`
+ * to opt out of the deadline entirely for that one call. What is NOT available
+ * is the old behaviour by accident: an unbounded call is now something a caller
+ * asks for, not something it gets by forgetting.
+ */
+export const DEFAULT_REST_TIMEOUT_MS = 30_000;
 
 /**
  * Env booleans, spelled the way operators spell them. Anything unrecognised —
@@ -220,12 +259,25 @@ export function resolveConfig(cfg: Config): ResolvedConfig {
     // Zero is not accepted here, unlike the cache TTL where it means "never
     // cache": a zero deadline would abort every read before it started, turning
     // a mistyped variable into an agent that attaches nothing at all — the exact
-    // failure this whole feature exists to end.
+    // failure this whole feature exists to end. `min` now binds an explicitly
+    // configured zero as well, not just an env one; the rule this comment
+    // describes was only ever half enforced.
     grantReadTimeoutMs: envMs(
       cfg.grantReadTimeoutMs,
       process.env.LAYR8_GRANT_READ_TIMEOUT_MS,
       DEFAULT_GRANT_READ_TIMEOUT_MS,
       1,
+    ),
+    // Zero IS accepted here, and the contrast with the line above is deliberate
+    // rather than an omission. On the grant read a zero deadline would abort
+    // every read before it began and silently attach nothing; on these calls it
+    // means "no deadline", which is exactly the pre-existing behaviour and a
+    // legitimate thing for an operator with a slow node to ask for.
+    restTimeoutMs: envMs(
+      cfg.restTimeoutMs,
+      process.env.LAYR8_REST_TIMEOUT_MS,
+      DEFAULT_REST_TIMEOUT_MS,
+      0,
     ),
   };
 }
@@ -233,9 +285,21 @@ export function resolveConfig(cfg: Config): ResolvedConfig {
 /**
  * A millisecond setting, from the explicit config or the environment.
  *
- * A non-numeric or out-of-range env value is IGNORED rather than turned into
- * `NaN`, which would make every comparison false and re-read the credentials on
- * EVERY message — a typo becoming a load problem nobody would connect to it.
+ * A non-numeric or out-of-range value is IGNORED rather than turned into `NaN`,
+ * which would make every comparison false and re-read the credentials on EVERY
+ * message — a typo becoming a load problem nobody would connect to it.
+ *
+ * `min` binds the EXPLICIT value too, which it did not before. The check used to
+ * sit only on the env branch, so the range each setting documents was enforced
+ * against operators and not against callers — and the caller is where the bad
+ * value actually comes from:
+ *
+ *     new Layr8Client(logErrors(), { restTimeoutMs: Number(process.env.MY_TIMEOUT) })
+ *
+ * With `MY_TIMEOUT` unset that is `NaN`, which passed straight through, failed
+ * `NaN > 0`, and silently returned every REST call to the unbounded state this
+ * deadline exists to end. No throw, no warning, nothing in a log. An impossible
+ * value now falls back to the documented default from either direction.
  */
 function envMs(
   explicit: number | undefined,
@@ -243,7 +307,9 @@ function envMs(
   fallback: number,
   min = 0,
 ): number {
-  if (explicit !== undefined) return explicit;
+  if (explicit !== undefined) {
+    return Number.isFinite(explicit) && explicit >= min ? explicit : fallback;
+  }
   const n = Number(raw);
   return raw !== undefined && raw.trim() !== "" && Number.isFinite(n) && n >= min ? n : fallback;
 }

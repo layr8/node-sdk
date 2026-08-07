@@ -263,3 +263,44 @@ describe("signCredential REST error", () => {
     }
   });
 });
+
+describe("the per-call deadline reaches the wire", () => {
+  // A `timeoutMs` that a public method accepts and then drops would be worse
+  // than not offering one: the caller believes the call is bounded and it is
+  // not. Each of these hangs for the full client default (30s, far past the
+  // 5s test timeout) if the option is not forwarded to the REST layer.
+
+  /** A server that accepts the request and never answers it. */
+  async function silentServer(): Promise<{ url: string; server: Server }> {
+    const parked: ServerResponse[] = [];
+    const { url, server } = await startMockServer((_req, res) => {
+      parked.push(res);
+    });
+    server.on("close", () => {
+      for (const res of parked) res.destroy();
+    });
+    return { url, server };
+  }
+
+  it("bounds every credential call it is passed to", async () => {
+    const { url, server } = await silentServer();
+    activeServer = server;
+
+    const client = newTestClient(url);
+    const deadline = /timed out after 60ms/;
+
+    await expect(
+      client.signCredential({ credentialSubject: {} }, { timeoutMs: 60 }),
+    ).rejects.toThrow(deadline);
+    await expect(
+      client.verifyCredential("jwt-data", { timeoutMs: 60 }),
+    ).rejects.toThrow(deadline);
+    await expect(
+      client.storeCredential("jwt-data", { timeoutMs: 60 }),
+    ).rejects.toThrow(deadline);
+    await expect(client.listCredentials({ timeoutMs: 60 })).rejects.toThrow(deadline);
+    await expect(
+      client.getCredential("urn:uuid:test-123", { timeoutMs: 60 }),
+    ).rejects.toThrow(deadline);
+  });
+});
