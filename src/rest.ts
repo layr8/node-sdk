@@ -66,8 +66,8 @@ export class RESTError extends Error {
 /** Per-request options for the internal REST client. */
 export interface RequestOptions {
   /**
-   * Give up after this many milliseconds of socket inactivity, rejecting with a
-   * timeout error and destroying the request.
+   * Give up after this many milliseconds of socket INACTIVITY — not of total
+   * elapsed time — rejecting with a timeout error and destroying the request.
    */
   timeoutMs?: number;
 }
@@ -98,9 +98,11 @@ export class RestClient {
   /**
    * Send a GET request and return the decoded response.
    *
-   * `opts.timeoutMs` bounds the whole exchange — see `request`. It is opt-in:
-   * a caller that has no deadline of its own is better off waiting than being
-   * cut off mid-answer.
+   * `opts.timeoutMs` is a SOCKET INACTIVITY deadline, not a total one: a peer
+   * that keeps trickling bytes keeps resetting it. That covers the failure it
+   * is here for — a connection that is accepted and then silent — and it is the
+   * only form that can also destroy the socket. Opt-in, because a caller with
+   * no deadline of its own is better off waiting than cut off mid-answer.
    */
   async get<T>(path: string, opts?: RequestOptions): Promise<T> {
     const headers: Record<string, string> = {};
