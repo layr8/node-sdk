@@ -22,10 +22,12 @@
 
 import { describe, it, expect, afterEach } from "vitest";
 import { WebSocketServer, WebSocket as WS } from "ws";
-import { createServer, type Server } from "node:http";
+import { createServer, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 
 import { Layr8Client, type ErrorHandler } from "../src/index.js";
+import type { Config, GrantMissInfo } from "../src/config.js";
+import { MAX_ATTACHED } from "../src/wallet.js";
 
 const discard: ErrorHandler = () => {};
 
@@ -66,11 +68,29 @@ const REAL_GRANT_CLAIMS = {
   },
 };
 
+const JWT_HEADER = Buffer.from(JSON.stringify({ alg: "EdDSA", typ: "vc+ld+jwt" })).toString(
+  "base64url",
+);
+
 const REAL_GRANT_JWT = [
-  Buffer.from(JSON.stringify({ alg: "EdDSA", typ: "vc+ld+jwt" })).toString("base64url"),
+  JWT_HEADER,
   Buffer.from(JSON.stringify(REAL_GRANT_CLAIMS)).toString("base64url"),
   "c2lnbmF0dXJl",
 ].join(".");
+
+/**
+ * The same grant under a different identity, for testing how a HOLDING behaves.
+ * Distinct ids because two attachments sharing one id is a separate defect, and
+ * a test that reproduced it would be measuring that instead.
+ */
+function grantVariant(n: number): string {
+  const id = `urn:uuid:vg-mcp-test-0000-0000-${String(n).padStart(12, "0")}`;
+  return [
+    JWT_HEADER,
+    Buffer.from(JSON.stringify({ ...REAL_GRANT_CLAIMS, id, jti: id })).toString("base64url"),
+    `c2lnbmF0dXJl${n}`,
+  ].join(".");
+}
 
 /** A node that speaks both halves the client needs, on one port. */
 class FakeNode {
@@ -85,6 +105,15 @@ class FakeNode {
   readDelayMs = 0;
   /** Answer credential reads with a 500 — a live node that cannot serve them. */
   failReads = false;
+  /**
+   * Accept the credential read and NEVER answer it. The worst production
+   * failure and the one `http.request` has no default defence against: a
+   * blackholing load balancer, a node wedged mid-request. Distinct from
+   * `failReads` in the only way that matters here — nothing ever settles.
+   */
+  hangReads = false;
+  /** Responses parked by `hangReads`, so teardown can let the server close. */
+  private readonly hung: ServerResponse[] = [];
 
   constructor() {
     this.http = createServer((req, res) => {
@@ -93,6 +122,10 @@ class FakeNode {
           url: req.url ?? "",
           apiKey: req.headers["x-api-key"] as string | undefined,
         });
+        if (this.hangReads) {
+          this.hung.push(res);
+          return;
+        }
         const answer = () => {
           if (this.failReads) {
             res.writeHead(500, { "content-type": "application/json" });
@@ -147,8 +180,38 @@ class FakeNode {
     return `ws://127.0.0.1:${port}/plugin_socket/websocket`;
   }
 
-  /** Push a denial back, as the node does when nothing covered the call. */
+  /**
+   * Push a denial back, in the shape the NODE builds it.
+   *
+   * `report_problem.ex` sets `pthid` to the denied message's thread — its `thid`
+   * or, for a message sent without one, its `id` — and sets NO `thid` at all.
+   * So the correlation that runs in production is the `parentThreadId` one, and
+   * an earlier version of this fixture set `thid` instead: the exact opposite
+   * branch. It was not coverage — deleting `parentThreadId` from the client's
+   * lookup left all 184 tests green.
+   */
   denyLast(code = "e.m.authz.denied"): void {
+    this.deny(this.messages().at(-1), code);
+  }
+
+  /** Deny one specific outbound message, whenever it was sent. */
+  deny(denied: Record<string, unknown> | undefined, code = "e.m.authz.denied"): void {
+    if (!denied) return;
+    this.push({
+      id: `pr-${denied.id as string}`,
+      type: "https://didcomm.org/report-problem/2.0/problem-report",
+      from: RESOURCE,
+      to: [AGENT],
+      pthid: (denied.thid as string) || (denied.id as string),
+      body: { code, comment: "Authorization requirements not met" },
+    });
+  }
+
+  /**
+   * Deny using `thid` instead. Not what our node does, but the correlation is a
+   * peer's choice and a DIDComm implementation is free to thread it that way.
+   */
+  denyLastByThread(code = "e.m.authz.denied"): void {
     const last = this.messages().at(-1) as Record<string, unknown> | undefined;
     if (!last) return;
     this.push({
@@ -177,6 +240,11 @@ class FakeNode {
   }
 
   close(): Promise<void> {
+    // A parked response holds its socket open, and `Server.close` waits for
+    // every open connection — without this the suite would hang on teardown
+    // rather than on the thing under test.
+    for (const res of this.hung) res.destroy();
+    this.hung.length = 0;
     return new Promise((r) => {
       this.wss.close(() => this.http.close(() => r()));
     });
@@ -203,8 +271,18 @@ async function sent(c: Layr8Client, msg: Record<string, unknown>): Promise<void>
   await new Promise((r) => setTimeout(r, 20));
 }
 
+/**
+ * `Partial<Config>`, not `Record<string, unknown>`.
+ *
+ * The loose type spread into the constructor below erased every config type
+ * check in this file. `Config.onGrantMiss` was declared without `denialCode` —
+ * the field this callback exists to deliver, used by the README's own example —
+ * and nothing here noticed, because nothing here was checking. `tsc` never saw
+ * it either: `tsconfig.json` excluded `tests`, which `tsconfig.tests.json` and
+ * `npm run lint` now close.
+ */
 async function connected(
-  cfg: Record<string, unknown> = {},
+  cfg: Partial<Config> = {},
   /** Runs before `connect()` — handlers may only be registered there. */
   prepare?: (c: Layr8Client) => void,
 ): Promise<Layr8Client> {
@@ -247,9 +325,12 @@ describe("a grant reaches the wire", () => {
     // where most grant-needing traffic lives.
     const c = await connected();
 
+    // `signal`, not a `timeoutMs` that `RequestOptions` has never had — the
+    // stray option compiled only because this file was outside the typecheck,
+    // and the request it was meant to bound simply never ended.
     void c.request(
       { to: [RESOURCE], type: MCP_CALL, body: { params: { name: "read_email" } } },
-      { timeoutMs: 50 },
+      { signal: AbortSignal.timeout(50) },
     ).catch(() => {});
 
     await new Promise((r) => setTimeout(r, 80));
@@ -406,6 +487,63 @@ describe("onGrantMiss fires on the DENIAL, not on every send", () => {
     expect(misses).toEqual([]);
   });
 
+  it("correlates a denial that threads with `thid` instead of `pthid`", async () => {
+    // Our node uses `pthid` and only `pthid`. The correlation is the peer's
+    // choice though, so both keys are looked up — and this is the case the old
+    // fixture was accidentally the ONLY cover for.
+    const misses: GrantMissInfo[] = [];
+    const c = await connected({ onGrantMiss: (i) => misses.push(i) });
+
+    await sent(c, { to: [RESOURCE], type: "https://layr8.io/protocols/other/1.0/x", body: {} });
+    node!.denyLastByThread();
+    await new Promise((r) => setTimeout(r, 60));
+
+    expect(misses).toHaveLength(1);
+  });
+
+  it("still reports the denial after a burst of messages that needed no grant", async () => {
+    // The bounded map used to evict by COUNT, and `withGrants` records every
+    // message it attaches nothing to — which for an agent holding no grants is
+    // every trust-ping and discovery message it sends. Sixty-four of those
+    // between a message and its denial and the one callback that mattered never
+    // fired, silently, which is the failure this whole feature exists to end.
+    const misses: GrantMissInfo[] = [];
+    const c = await connected({ onGrantMiss: (i) => misses.push(i) });
+    node!.grants = [];
+
+    await sent(c, { to: [RESOURCE], type: "https://layr8.io/protocols/other/1.0/x", body: {} });
+    const denied = node!.messages()[0];
+
+    for (let n = 0; n < 70; n++) {
+      await c.send(
+        { to: [RESOURCE], type: "https://didcomm.org/trust-ping/2.0/ping", body: {} } as never,
+        { fireAndForget: true },
+      );
+    }
+
+    node!.deny(denied);
+    await new Promise((r) => setTimeout(r, 60));
+
+    expect(misses).toHaveLength(1);
+    expect(misses[0]).toMatchObject({ denialCode: "e.m.authz.denied" });
+  });
+
+  it("says so when the cap leaves covering credentials off the message", async () => {
+    // A dropped credential and a credential never held produce the SAME denial.
+    // The holder is the only party that can tell them apart, so silence here is
+    // the same defect in a new place.
+    const held = MAX_ATTACHED + 4;
+    const misses: GrantMissInfo[] = [];
+    const c = await connected({ onGrantMiss: (i) => misses.push(i) });
+    node!.grants = Array.from({ length: held }, (_, i) => ({ credential_jwt: grantVariant(i) }));
+
+    await sent(c, { to: [RESOURCE], type: MCP_CALL, body: { params: { name: "read_email" } } });
+
+    expect((node!.messages()[0].attachments as unknown[]).length).toBe(MAX_ATTACHED);
+    expect(misses).toHaveLength(1);
+    expect(misses[0].capped).toEqual({ covering: held, attached: MAX_ATTACHED });
+  });
+
   it("still announces a credential READ failure at once", async () => {
     // Unlike "nothing covered it", this is never normal — every subsequent send
     // is flying blind, and waiting for a denial would bury it.
@@ -481,6 +619,61 @@ describe("call order survives the grant read", () => {
 
     const ids = node!.messages().map((m) => (m.attachments as Array<{ id: string }>)[0]?.id);
     expect(ids).toEqual(["urn:uuid:vg-mcp-test-0000-0000-000000000001", "caller"]);
+  });
+});
+
+describe("a credential read that never answers", () => {
+  // The read runs INSIDE the per-channel write chain, because the write order
+  // has to be the call order. That makes an unbounded read a channel-wide
+  // deadlock, and `http.request` has no default timeout to end it: measured
+  // before the deadline, a node that accepted the TCP connection and never
+  // answered left `send()` neither resolved nor rejected, forever — and took
+  // every later send on that channel with it, including ones carrying their own
+  // attachments that never touch the wallet.
+  //
+  // "The wallet must not block the send" was already the rule. It held for a
+  // read that FAILS. A read that HANGS is the commoner production failure — a
+  // blackholing load balancer, a wedged node — and it did not hold at all.
+
+  it("gives up, sends anyway, and lets the next message through", async () => {
+    const misses: GrantMissInfo[] = [];
+    const c = await connected({ grantReadTimeoutMs: 80, onGrantMiss: (i) => misses.push(i) });
+    node!.hangReads = true;
+
+    const started = Date.now();
+    // A consults the wallet. B carries its own attachment, so `withGrants`
+    // returns on its first line and B never reads anything — it is here to
+    // prove the HEAD-OF-LINE half: before the deadline, B hung on A.
+    const a = c.send(
+      { to: [RESOURCE], type: MCP_CALL, body: { params: { name: "read_email" } } } as never,
+      { fireAndForget: true },
+    );
+    const b = c.send(
+      {
+        to: [RESOURCE],
+        type: MCP_CALL,
+        body: {},
+        attachments: [{ id: "caller", media_type: "application/json", data: { json: {} } }],
+      } as never,
+      { fireAndForget: true },
+    );
+
+    // Neither of these settles at all without the deadline; the assertion below
+    // is the bound, and the suite timeout is the backstop.
+    await Promise.all([a, b]);
+    const elapsed = Date.now() - started;
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(elapsed).toBeLessThan(2_000);
+    // A goes out unattached rather than not at all: the node is the authority
+    // on whether it needed a grant.
+    const ids = node!.messages().map((m) => (m.attachments as Array<{ id: string }> | undefined));
+    expect(ids[0]).toBeUndefined();
+    expect(ids[1]?.[0]?.id).toBe("caller");
+
+    // A timeout is a read failure, and a read failure is announced at once.
+    expect(misses).toHaveLength(1);
+    expect(String((misses[0].error as Error).message)).toContain("timed out");
   });
 });
 

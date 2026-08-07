@@ -23,8 +23,20 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
 
 - `onGrantMiss` — called when the node denies a message that went out with
   nothing attached, carrying the node's denial code. Also called immediately,
-  with `error`, when the grants could not be read at all. The sender is the only
-  party that can tell those apart from a misconfigured grant.
+  with `error`, when the grants could not be read at all, and with `capped` when
+  more credentials covered a message than fit on one frame. The sender is the
+  only party that can tell any of those apart from a misconfigured grant.
+
+  Its argument is the exported `GrantMissInfo`.
+
+- `grantReadTimeoutMs` (default 2s, env `LAYR8_GRANT_READ_TIMEOUT_MS`) — deadline
+  on the credential read that precedes a send. `http.request` has no default
+  timeout, and this read runs inside the per-channel write chain that keeps
+  writes in call order: a node that accepts the connection and never answers
+  would otherwise stall every later send on that channel, including sends
+  carrying their own attachments that never consult the wallet. A timeout is
+  treated as a read failure — the message goes out unattached, `onGrantMiss`
+  says so.
 
 - `client.refreshGrants(did?)` — drop the cached grants for a DID, for an agent
   that has just been told it was granted something and should not wait out
@@ -38,6 +50,29 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
 - Outbound writes keep **call order** even though attaching now puts an `await`
   in front of every one of them. `send(A)` then `send(B)`, with A's credential
   read the slower, previously arrived as `[B, A]`.
+
+- A grant whose scope names a resource by **segment prefix** is now attached.
+  `structure_v2.rego` matches `tables` against `tables/customers` (and not
+  against `tables_archive`); this side compared for equality only, so it withheld
+  a credential the policy would have honoured — the expensive direction, because
+  the failure is a silent denial.
+
+- The cap on attachments per message no longer discards by read order alone. The
+  tool named in the message is used to RANK the covering set (never to filter
+  it), so a holder with per-tool grants keeps the one that authorises this call
+  instead of whichever sixteen the node happened to return first. When the cap
+  does bite, `onGrantMiss` says so.
+
+- A denial is still reported after a burst of traffic. The map of messages sent
+  unattached was evicted by count, and every message needing no grant took a
+  slot — 64 trust-pings between a message and its denial and `onGrantMiss` never
+  fired. It is evicted by age now.
+
+- `Config.onGrantMiss` declares `denialCode`. The field was passed at runtime and
+  used by the README's own example, but the public type omitted it, so that
+  example did not compile. Both declarations are now one exported type, and
+  `npm run lint` type-checks `tests/` (`tsconfig.tests.json`) — the gap that let
+  the two drift.
 
 ## [0.2.1] - 2026-07-21
 

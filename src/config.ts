@@ -42,6 +42,37 @@ export const DEFAULT_DID_SPEC: Required<DidSpec> = {
   ],
 };
 
+/**
+ * What `onGrantMiss` is told.
+ *
+ * ONE definition, exported, because there were two: a hand-written literal on
+ * `Config.onGrantMiss` and another on the client's private field. They drifted —
+ * the public one was missing `denialCode`, the field the whole callback exists
+ * to deliver and the one the README's example destructures, so copying that
+ * example out of the README failed to compile while working perfectly at
+ * runtime.
+ */
+export interface GrantMissInfo {
+  /** The message's recipients. */
+  to: string[];
+  /** The message's DIDComm type. */
+  type: string;
+  /**
+   * The node's denial code, when this fired because a denial came back for a
+   * message that went out with nothing attached.
+   */
+  denialCode?: string;
+  /** Set when the grants could not be READ at all — never a normal outcome. */
+  error?: unknown;
+  /**
+   * Set when the covering set was CAPPED: more credentials covered this message
+   * than `MAX_ATTACHED` allows on one frame, so some were left off. The policy
+   * allows on the first passing grant, so the one that mattered may be among
+   * the ones dropped.
+   */
+  capped?: { covering: number; attached: number };
+}
+
 /** Configuration for a Layr8 client. */
 export interface Config {
   /** WebSocket URL of the Layr8 cloud-node. Fallback: LAYR8_NODE_URL env. */
@@ -68,15 +99,34 @@ export interface Config {
   /** How long held grants are cached before re-reading. Default 60s. Fallback: LAYR8_GRANT_CACHE_MS env. */
   grantCacheMs?: number;
   /**
-   * Called when a message went out with NO covering grant, or when the grants
-   * could not be read.
+   * Deadline on the credential read that precedes a send. Default 2s.
+   * Fallback: LAYR8_GRANT_READ_TIMEOUT_MS env.
+   *
+   * The read sits inside the per-channel write chain, because the write order
+   * has to be the call order. That makes an unbounded read a channel-wide
+   * deadlock: a node that accepts the TCP connection and never answers stops
+   * EVERY later send on that channel, including sends that carry their own
+   * attachments and never touch the wallet. Node's `http.request` has no
+   * default timeout, so without this there is nothing to end the wait.
+   *
+   * Timing out is treated as a read failure — the message goes out unattached
+   * and `onGrantMiss` says so, which is what happens on any other read error.
+   *
+   * @see `Wallet`'s failure cache, which is deliberately kept at least this
+   * long: a hung node must cost one stalled send per failure window, not one
+   * per message.
+   */
+  grantReadTimeoutMs?: number;
+  /**
+   * Called when a message went out with NO covering grant, when the covering
+   * set had to be capped, or when the grants could not be read.
    *
    * The sender is the only party that knows nothing was attached: the node's
    * denial names the grant it could not find, which sends people to check a
    * grant that is fine. Wire this to a log and the next such incident is one
    * line instead of a day.
    */
-  onGrantMiss?: (info: { to: string[]; type: string; error?: unknown }) => void;
+  onGrantMiss?: (info: GrantMissInfo) => void;
 }
 
 /** Resolved configuration with required fields guaranteed present. */
@@ -87,10 +137,31 @@ export interface ResolvedConfig {
   didSpec: Required<DidSpec>;
   attachGrants: boolean;
   grantCacheMs: number;
+  grantReadTimeoutMs: number;
 }
 
 /** Default grant cache TTL. Short: a grant minted seconds ago is invisible until it lapses. */
 export const DEFAULT_GRANT_CACHE_MS = 60_000;
+
+/**
+ * Default deadline on the credential read.
+ *
+ * Two seconds, chosen from both ends:
+ *
+ * - It is a JSON GET to the same node this client already holds a WebSocket to,
+ *   so the honest answer arrives in milliseconds. Two seconds survives a cold
+ *   node, a container still warming its connection pool, and a GC pause, and
+ *   still leaves plenty of room before anything a human would call "hung".
+ * - It sits comfortably under the wallet's 5s failure cache, which is measured
+ *   from the START of the read. A timeout at or above that TTL would leave the
+ *   failure lapsed the moment it was recorded, so every single send would pay
+ *   the full deadline instead of one per window.
+ *
+ * Configurable because the second point is the kind of relationship a deployment
+ * on a slow link needs to be able to move; the wallet keeps its failure cache at
+ * least as long as this value so raising it does not silently undo the first.
+ */
+export const DEFAULT_GRANT_READ_TIMEOUT_MS = 2_000;
 
 /**
  * Env booleans, spelled the way operators spell them. Anything unrecognised —
@@ -139,20 +210,40 @@ export function resolveConfig(cfg: Config): ResolvedConfig {
       cfg.didSpec?.verificationMethods ?? DEFAULT_DID_SPEC.verificationMethods,
   };
 
-  // A non-numeric or negative env value is ignored rather than turned into
-  // `NaN`, which would make every comparison false and re-read the credentials
-  // on EVERY message — a typo becoming a load problem nobody would connect to it.
-  const envCacheMs = Number(process.env.LAYR8_GRANT_CACHE_MS);
-  const grantCacheMs =
-    cfg.grantCacheMs ??
-    (Number.isFinite(envCacheMs) && envCacheMs >= 0 ? envCacheMs : DEFAULT_GRANT_CACHE_MS);
-
   return {
     nodeUrl: normalizedUrl,
     apiKey,
     agentDid,
     didSpec,
     attachGrants: cfg.attachGrants ?? envBool(process.env.LAYR8_ATTACH_GRANTS) ?? true,
-    grantCacheMs,
+    grantCacheMs: envMs(cfg.grantCacheMs, process.env.LAYR8_GRANT_CACHE_MS, DEFAULT_GRANT_CACHE_MS),
+    // Zero is not accepted here, unlike the cache TTL where it means "never
+    // cache": a zero deadline would abort every read before it started, turning
+    // a mistyped variable into an agent that attaches nothing at all — the exact
+    // failure this whole feature exists to end.
+    grantReadTimeoutMs: envMs(
+      cfg.grantReadTimeoutMs,
+      process.env.LAYR8_GRANT_READ_TIMEOUT_MS,
+      DEFAULT_GRANT_READ_TIMEOUT_MS,
+      1,
+    ),
   };
+}
+
+/**
+ * A millisecond setting, from the explicit config or the environment.
+ *
+ * A non-numeric or out-of-range env value is IGNORED rather than turned into
+ * `NaN`, which would make every comparison false and re-read the credentials on
+ * EVERY message — a typo becoming a load problem nobody would connect to it.
+ */
+function envMs(
+  explicit: number | undefined,
+  raw: string | undefined,
+  fallback: number,
+  min = 0,
+): number {
+  if (explicit !== undefined) return explicit;
+  const n = Number(raw);
+  return raw !== undefined && raw.trim() !== "" && Number.isFinite(n) && n >= min ? n : fallback;
 }

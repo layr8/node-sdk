@@ -19,10 +19,20 @@
  *
  * ## The attachment shape is load-bearing
  *
- * `media_type: "application/vc+jwt"` with the compact JWS under `data.jws`.
- * Anything else — base64 in `data.base64`, `application/vp+jwt` — is dropped
- * SILENTLY by the node's credential extractor, and the denial that follows looks
- * identical to having no grant at all.
+ * `media_type` is the ONLY thing the node's credential extractor filters on: it
+ * keeps attachments whose media type is exactly `"application/vc+jwt"` and drops
+ * every other one SILENTLY, before looking at the data at all. A VP
+ * (`application/vp+jwt`) is discarded on that rule, and the denial that follows
+ * is byte-for-byte the one you get for attaching nothing — which is how a
+ * partner team spent a day looking at a grant that was fine.
+ *
+ * `data.jws` is the primary place the JWS is read from, and what this SDK
+ * writes. `data.base64` is NOT dropped: the extractor falls back to it and
+ * base64url-decodes it. `data.jws` is still the right choice — it is the field
+ * the extractor reaches for first and the one the whole ecosystem writes — but
+ * the reason is "primary path", not "the alternative is discarded". A confident
+ * wrong reason costs more than no comment: it sends the next reader looking in
+ * the wrong place for why their attachment vanished.
  *
  ## Over-attaching is free; under-attaching is not
  *
@@ -51,6 +61,8 @@
  * dead costs a working call, and the failure is silent. The wallet's job is to
  * put on the wire everything that plausibly applies.
  */
+
+import { DEFAULT_GRANT_READ_TIMEOUT_MS } from "./config.js";
 
 /** The attachment shape the node's `CredentialExtractor` keys on. */
 export interface VgAttachment {
@@ -88,13 +100,15 @@ export interface HeldCredential {
  * Over-attaching is free at the policy, but not on the wire: a holder with
  * per-tool grants can hold dozens, each a 1-2KB JWT, on every message. The cap
  * is far above any real holding; when it bites, the entries kept are the most
- * specific ones — see `selectFor`.
+ * likely to matter — see `selectFor` — and the caller is TOLD, because a
+ * credential dropped here produces the same indistinguishable denial as one
+ * never held.
  */
 export const MAX_ATTACHED = 16;
 
 /** Reads a JSON path from the node. `RestClient` is the SDK's, deliberately. */
 export interface CredentialReader {
-  get<T>(path: string): Promise<T>;
+  get<T>(path: string, opts?: { timeoutMs?: number }): Promise<T>;
 }
 
 /**
@@ -125,10 +139,31 @@ function messageTypeMatches(types: string[] | undefined, want: string): boolean 
   return Array.isArray(types) && (types.includes("*") || types.includes(want));
 }
 
+/**
+ * The three ways a scope's `resource` can cover a message's, in the order
+ * `structure_v2.rego`'s `_resource_ok` states them:
+ *
+ *   1. equal;
+ *   2. `foo/*` covers anything under `foo/` — note the rego strips only the
+ *      `*`, so the trailing slash is part of the prefix and `foo/*` does not
+ *      cover `foobar`;
+ *   3. a bare `foo` covers `foo/bar` — a SEGMENT prefix, requiring the next
+ *      character to be `/` so `tables` covers `tables/customers` but not
+ *      `tables_archive` (`structure_v2_test.rego`
+ *      `test_resource_segment_prefix` / `test_resource_non_segment_no_match`).
+ *
+ * Clause 3 was missing here, and its absence pointed the wrong way: this side
+ * withheld a grant the policy would have honoured, which is the failure that
+ * costs a working call and shows up as "no grant covers this call". It bites
+ * nothing today only because the PEP sets the message resource to the recipient
+ * DID and a `did:web` contains no `/` — a premise nothing in this file states
+ * and nothing in this file controls.
+ */
 function resourceMatches(r: string | undefined, want: string): boolean {
   if (r == null || r === "" || r === "*") return true;
   if (r.endsWith("/*")) return want.startsWith(r.slice(0, -1));
-  return r === want;
+  if (r === want) return true;
+  return want.startsWith(r) && want.charAt(r.length) === "/";
 }
 
 function covers(
@@ -159,6 +194,12 @@ function covers(
 export function selectFor(
   creds: HeldCredential[],
   msg: { recipients: string[]; typeUri: string; tool?: string; now?: number },
+  /**
+   * Told when the cap left credentials off. Silence here is the same class of
+   * failure this file exists to end: the holder is the only party that knows a
+   * covering credential never reached the wire.
+   */
+  onCapped?: (info: { covering: number; attached: number }) => void,
 ): VgAttachment[] {
   const { protocol, messageType } = splitTypeUri(msg.typeUri);
   const now = msg.now ?? Date.now();
@@ -167,24 +208,54 @@ export function selectFor(
     msg.recipients.some((r) => covers(c, r, protocol, messageType)),
   );
 
-  // Ordering only matters when the cap bites. Live before lapsed, then named
-  // resource before wildcard: if something has to be left off, it should be the
-  // entry least likely to have been the one that mattered.
+  // Ordering only matters when the cap bites. It decides which credentials are
+  // LEFT OFF, so it ranks by how likely each one is to have been the one that
+  // mattered — it is not a filter, and nothing here withholds anything the cap
+  // has room for.
+  //
+  // Live beats lapsed by more than everything else combined: a certainly-expired
+  // grant cannot be the one that would have worked.
+  //
+  // Then the tool. `tools` was carried into this function and never read — the
+  // parameter was dead, so under the cap the choice among per-tool grants came
+  // down to the node's row order, and the comment on MAX_ATTACHED describes
+  // exactly the holding where that bites: dozens of grants identical in
+  // protocol, message type and resource, differing only in which tool they name.
+  // Thirty of those and the one that authorises this call sitting twentieth
+  // meant a silent drop and an `e.m.authz.denied` with no way to see why.
+  //
+  // Naming this tool ranks first, naming no tool at all (unrestricted) second,
+  // naming only OTHER tools last — last, not excluded: `grant.tools` is not a
+  // policy input anywhere, helix evaluates `constraints.rego` keyed by grant id,
+  // and an earlier version that filtered on it dropped grants the node would
+  // have honoured.
+  const toolRank = (c: HeldCredential): number => {
+    if (c.tools.length === 0) return 1;
+    return msg.tool !== undefined && c.tools.includes(msg.tool) ? 0 : 2;
+  };
+
+  // Named resource before wildcard, as the finest-grained tiebreak.
   const rank = (c: HeldCredential): number =>
-    (c.expiresAt !== undefined && c.expiresAt <= now ? 2 : 0) +
+    (c.expiresAt !== undefined && c.expiresAt <= now ? 8 : 0) +
+    toolRank(c) * 2 +
     (c.scope.some((s) => s.resource && s.resource !== "*" && !s.resource.endsWith("/*")) ? 0 : 1);
 
-  return covering
+  const chosen = covering
     .map((c, i) => ({ c, i }))
     // Index as the tiebreak: a stable order, so the same message does not carry
     // a different set on each send.
     .sort((a, b) => rank(a.c) - rank(b.c) || a.i - b.i)
-    .slice(0, MAX_ATTACHED)
-    .map(({ c }) => ({
-      id: c.id,
-      media_type: "application/vc+jwt" as const,
-      data: { jws: c.rawJwt },
-    }));
+    .slice(0, MAX_ATTACHED);
+
+  if (chosen.length < covering.length) {
+    onCapped?.({ covering: covering.length, attached: chosen.length });
+  }
+
+  return chosen.map(({ c }) => ({
+    id: c.id,
+    media_type: "application/vc+jwt" as const,
+    data: { jws: c.rawJwt },
+  }));
 }
 
 function decodeJwtPayload(jwt: string): Record<string, unknown> {
@@ -276,17 +347,29 @@ export class Wallet {
    * development. A `fetch` here works everywhere except the machines this is
    * developed on, and fails there as a network error that names no cause.
    */
+  /**
+   * How long a FAILED read is remembered. Short, because the fix for whatever
+   * broke it should take effect without a restart — and never longer than a
+   * success is cached, or lowering `grantCacheMs` to see a new grant sooner
+   * would leave a stale failure outliving it.
+   *
+   * Never shorter than the read deadline either. The entry is stamped with the
+   * time the read STARTED, so a failure TTL at or below the deadline is already
+   * lapsed the moment a timeout records it — and a hung node would then cost
+   * every send the full deadline instead of one send per window, with the write
+   * chain making those stalls consecutive.
+   */
+  private readonly failureTtlMs: number;
+
   constructor(
     private readonly reader: CredentialReader,
     private readonly ttlMs = 60_000,
-    /**
-     * How long a FAILED read is remembered. Short, because the fix for whatever
-     * broke it should take effect without a restart — and never longer than a
-     * success is cached, or lowering `grantCacheMs` to see a new grant sooner
-     * would leave a stale failure outliving it.
-     */
-    private readonly failureTtlMs = Math.min(ttlMs, 5_000),
-  ) {}
+    failureTtlMs?: number,
+    /** Deadline on one read — see `Config.grantReadTimeoutMs`. */
+    private readonly readTimeoutMs = DEFAULT_GRANT_READ_TIMEOUT_MS,
+  ) {
+    this.failureTtlMs = failureTtlMs ?? Math.min(ttlMs, Math.max(5_000, readTimeoutMs));
+  }
 
   /** Drop the cached grants for `did` (or all), forcing the next send to re-read. */
   refresh(did?: string): void {
@@ -316,8 +399,14 @@ export class Wallet {
   }
 
   private async read(did: string): Promise<HeldCredential[]> {
+    // The deadline is the reason this cannot hang the channel it runs on — see
+    // `Config.grantReadTimeoutMs`. It belongs HERE rather than as a race around
+    // the await in the caller: only the request itself can also destroy the
+    // socket, and a race would leave the connection open and this promise parked
+    // in the cache, pending, for every send until the TTL lapsed.
     const data = await this.reader.get<unknown>(
       `/api/v1/credentials?holder_did=${encodeURIComponent(did)}`,
+      { timeoutMs: this.readTimeoutMs },
     );
     const records = (
       Array.isArray(data) ? data : ((data as { credentials?: unknown[] })?.credentials ?? [])
@@ -334,12 +423,17 @@ export class Wallet {
   async attachmentsFor(
     did: string,
     msg: { recipients: string[]; typeUri: string; body?: unknown },
+    onCapped?: (info: { covering: number; attached: number }) => void,
   ): Promise<VgAttachment[]> {
     const creds = await this.heldBy(did);
-    return selectFor(creds, {
-      recipients: msg.recipients,
-      typeUri: msg.typeUri,
-      tool: toolNameOf(msg.body),
-    });
+    return selectFor(
+      creds,
+      {
+        recipients: msg.recipients,
+        typeUri: msg.typeUri,
+        tool: toolNameOf(msg.body),
+      },
+      onCapped,
+    );
   }
 }

@@ -105,6 +105,25 @@ describe("selecting the covering set", () => {
     expect(selectFor([c], { recipients: ["did:web:elsewhere.com:agents/x"], typeUri: `${PROTO}/t` })).toEqual([]);
   });
 
+  it("honours a bare SEGMENT prefix, as the policy does", () => {
+    // `structure_v2.rego`'s `_resource_ok` has a third clause this side was
+    // missing: a bare `tables` covers `tables/customers`, requiring the next
+    // character to be `/` so it does not also cover `tables_archive`
+    // (`structure_v2_test.rego`: `test_resource_segment_prefix`,
+    // `test_resource_non_segment_no_match`).
+    //
+    // The omission pointed the expensive way — withholding a grant the policy
+    // would have honoured, which costs a working call and surfaces as the same
+    // "no grant covers this call" this file exists to end. It bites nothing
+    // today only because the PEP sets the message resource to the recipient DID
+    // and a `did:web` has no `/` in it: a premise nothing in the code states.
+    const c = held({ scope: [{ protocol: PROTO, messageTypes: ["*"], resource: "tables" }] });
+
+    expect(selectFor([c], { recipients: ["tables"], typeUri: `${PROTO}/t` })).toHaveLength(1);
+    expect(selectFor([c], { recipients: ["tables/customers"], typeUri: `${PROTO}/t` })).toHaveLength(1);
+    expect(selectFor([c], { recipients: ["tables_archive"], typeUri: `${PROTO}/t` })).toEqual([]);
+  });
+
   describe("the tool allowlist is NOT a filter here", () => {
     // `grant.rego` allows on the first passing grant and ignores the rest, so an
     // extra credential on the wire costs nothing — while one withheld costs a
@@ -156,6 +175,72 @@ describe("what goes on the wire stays bounded and distinguishable", () => {
     expect(selectFor(many, { recipients: [AGENT], typeUri: `${PROTO}/t` })).toHaveLength(MAX_ATTACHED);
   });
 
+  describe("when it caps, the grant most likely to matter keeps its slot", () => {
+    // `selectFor` took a `tool` and never read it. Under the cap that left the
+    // choice among per-tool grants to the node's row order — and the holding
+    // MAX_ATTACHED was written for is exactly that one: dozens of grants
+    // identical in protocol, message type and resource, differing only in the
+    // tool they name. Thirty of them with the authorising one twentieth meant a
+    // silent drop and an `e.m.authz.denied` with nothing to look at.
+    //
+    // A RANKING, not a filter. Nothing is withheld that the cap has room for:
+    // `grant.tools` is not a policy input anywhere — helix evaluates
+    // `constraints.rego` keyed by grant id — and an earlier version that
+    // filtered on it dropped grants the node would have honoured.
+
+    const others = (n: number) =>
+      Array.from({ length: n }, (_, i) =>
+        held({ id: `urn:uuid:other-${i}`, tools: [`tool-${i}`] }),
+      );
+
+    it("keeps the grant that names THIS tool, read last though it was", () => {
+      const mine = held({ id: "urn:uuid:names-this-tool", tools: ["the-one"] });
+
+      const out = selectFor([...others(MAX_ATTACHED + 4), mine], {
+        recipients: [AGENT],
+        typeUri: `${PROTO}/tools-call`,
+        tool: "the-one",
+      });
+
+      expect(out).toHaveLength(MAX_ATTACHED);
+      expect(out[0].id).toBe("urn:uuid:names-this-tool");
+    });
+
+    it("keeps an UNRESTRICTED grant over one that names only other tools", () => {
+      const any = held({ id: "urn:uuid:no-tool-bound", tools: [] });
+
+      const out = selectFor([...others(MAX_ATTACHED + 4), any], {
+        recipients: [AGENT],
+        typeUri: `${PROTO}/tools-call`,
+        tool: "the-one",
+      });
+
+      expect(out.map((a) => a.id)).toContain("urn:uuid:no-tool-bound");
+    });
+
+    it("tells the caller when it left credentials off", () => {
+      // Silence here is the same defect in a new place: a credential dropped by
+      // the cap and a credential never held produce the SAME denial, and the
+      // holder is the only party who can tell them apart.
+      const onCapped = vi.fn();
+
+      selectFor(others(MAX_ATTACHED + 4), { recipients: [AGENT], typeUri: `${PROTO}/t` }, onCapped);
+
+      expect(onCapped).toHaveBeenCalledWith({
+        covering: MAX_ATTACHED + 4,
+        attached: MAX_ATTACHED,
+      });
+    });
+
+    it("says nothing when everything fits", () => {
+      const onCapped = vi.fn();
+
+      selectFor(others(MAX_ATTACHED), { recipients: [AGENT], typeUri: `${PROTO}/t` }, onCapped);
+
+      expect(onCapped).not.toHaveBeenCalled();
+    });
+  });
+
   it("when it caps, a LIVE grant keeps its slot over a lapsed one", () => {
     // Validity is the PDP's decision and nothing is withheld for it. But if
     // something must be left off, it should be the entry that has certainly
@@ -199,11 +284,18 @@ describe("what goes on the wire stays bounded and distinguishable", () => {
 });
 
 describe("the attachment shape", () => {
-  it("is the one the node keys on — anything else is dropped SILENTLY", () => {
-    // `media_type: application/vc+jwt` with the compact JWS under `data.jws`.
-    // base64 in `data.base64`, or `application/vp+jwt`, is discarded by the
-    // node's extractor and the denial that follows is indistinguishable from
-    // having attached nothing at all.
+  it("is the one the node keys on — a wrong MEDIA TYPE is dropped SILENTLY", () => {
+    // `media_type` is the only thing the node's extractor filters on: exactly
+    // `application/vc+jwt` is kept, everything else is discarded before the data
+    // is looked at, and the denial that follows is byte-for-byte the one you get
+    // for attaching nothing. A partner team lost a day to that with a
+    // hand-built `application/vp+jwt`.
+    //
+    // `data.base64` is NOT part of that rule — the extractor falls back to it
+    // and base64url-decodes it. `data.jws` is still what this SDK writes,
+    // because it is the field read first and the one the ecosystem writes; the
+    // earlier claim here that the alternative was discarded was simply false,
+    // and a confident wrong reason sends the next reader to the wrong place.
     const [att] = selectFor([held({ rawJwt: "a.b.c" })], {
       recipients: [AGENT],
       typeUri: `${PROTO}/space-info`,
@@ -274,6 +366,34 @@ describe("Wallet", () => {
     expect(get.mock.calls[0][0]).toBe(
       `/api/v1/credentials?holder_did=${encodeURIComponent(AGENT)}`,
     );
+  });
+
+  it("puts a DEADLINE on the read", async () => {
+    // The read sits inside the per-channel write chain, so an unbounded one
+    // deadlocks the channel — and `http.request` has no default timeout to end
+    // it. Asserted here at the point the option is handed over, because that is
+    // the link a refactor can drop while every other test still passes;
+    // `rest.test.ts` proves the client honours it.
+    const { get, reader } = okReader();
+
+    await new Wallet(reader, 60_000, undefined, 1_234).heldBy(AGENT);
+
+    expect(get.mock.calls[0][1]).toEqual({ timeoutMs: 1_234 });
+  });
+
+  it("remembers a failure for at least as long as the deadline", async () => {
+    // The failure entry is stamped with the time the read STARTED. A failure TTL
+    // at or below the deadline would therefore be lapsed the moment a timeout
+    // recorded it, and a hung node would cost EVERY send the full deadline —
+    // consecutively, because the write chain serialises them.
+    const get = vi.fn().mockRejectedValue(new Error("timed out after 20000ms"));
+    const reader = { get } as { get<T>(p: string): Promise<T> };
+    const w = new Wallet(reader, 60_000, undefined, 20_000);
+
+    await expect(w.heldBy(AGENT, 0)).rejects.toThrow();
+    await expect(w.heldBy(AGENT, 19_000)).rejects.toThrow();
+
+    expect(get).toHaveBeenCalledTimes(1);
   });
 
   it("caches, so a send does not cost a round trip", async () => {

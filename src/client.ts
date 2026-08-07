@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import type { Config, DidSpec } from "./config.js";
+import type { Config, DidSpec, GrantMissInfo } from "./config.js";
 import { resolveConfig } from "./config.js";
 import type {
   Credential,
@@ -140,6 +140,16 @@ export class DidHandle {
 /** The one inbound type `noteDenial` cares about. */
 const PROBLEM_REPORT_TYPE = "https://didcomm.org/report-problem/2.0/problem-report";
 
+/**
+ * How long a message sent with nothing attached is kept, waiting for a denial.
+ *
+ * The node evaluates before it delivers, so the denial follows its message by a
+ * round trip — one second would cover it. A minute is chosen to survive a
+ * paused process or a reconnect, and it is what bounds the map: see
+ * `rememberUnattached`.
+ */
+const UNATTACHED_WINDOW_MS = 60_000;
+
 export class Layr8Client extends EventEmitter {
   private readonly cfg;
   private readonly onError: ErrorHandler;
@@ -150,16 +160,9 @@ export class Layr8Client extends EventEmitter {
    * Messages that went out with nothing attached, keyed by thread, so a denial
    * can be matched back to them. Bounded — this is a diagnostic, not a ledger.
    */
-  private readonly unattached = new Map<string, { to: string[]; type: string }>();
+  private readonly unattached = new Map<string, { at: number; to: string[]; type: string }>();
   /** Told when a message went out with no covering grant — see `withGrants`. */
-  private readonly onGrantMiss?: (info: {
-    to: string[];
-    type: string;
-    /** The node's denial code, when this fired because of one. */
-    denialCode?: string;
-    /** Set when the grants could not be READ at all. */
-    error?: unknown;
-  }) => void;
+  private readonly onGrantMiss?: (info: GrantMissInfo) => void;
   private readonly registry = new HandlerRegistry();
 
   private connection: Connection | null = null;
@@ -203,7 +206,9 @@ export class Layr8Client extends EventEmitter {
     // issued — and the denial names the grant, not the omission. Opting IN would
     // have left every existing agent in exactly the state that cost two teams
     // days.
-    this.wallet = this.cfg.attachGrants ? new Wallet(this.rest, this.cfg.grantCacheMs) : null;
+    this.wallet = this.cfg.attachGrants
+      ? new Wallet(this.rest, this.cfg.grantCacheMs, undefined, this.cfg.grantReadTimeoutMs)
+      : null;
     this.onGrantMiss = cfg.onGrantMiss;
   }
 
@@ -932,6 +937,17 @@ export class Layr8Client extends EventEmitter {
    * attached, and this path did not have them. Wiring `send` and `request` and
    * not this one leaves request/reply agents, the dominant pattern, as broken as
    * before and now silently: the miss callback was bypassed too.
+   *
+   * The grant read happens BEFORE `ordered` here, where `send` and `request`
+   * both do it inside. That asymmetry is deliberate. Those two exist to honour
+   * the CALLER's sequence — an agent that fires `send(A)` then `send(B)` without
+   * awaiting is entitled to `[A, B]`, so the read has to sit inside the chain
+   * and the chain has to bound it (`Config.grantReadTimeoutMs`). A handler's
+   * reply has no such caller: it is dispatched from an inbound message, and
+   * there is no contract that reply-to-A precedes reply-to-B or precedes
+   * anything the application sends meanwhile. Reading outside the chain means a
+   * slow read here delays only its own reply, and the chain still serialises the
+   * WRITE so two replies cannot interleave on the wire.
    */
   private async sendReplyMessage(
     resp: Partial<Message>,
@@ -1038,16 +1054,30 @@ export class Layr8Client extends EventEmitter {
    * trust-ping, problem reports) needs none; refusing here on a transient fetch
    * error would take down calls that were never going to need us. The send
    * proceeds unattached and `onGrantMiss` says so.
+   *
+   * "Does not block" has to hold for a read that HANGS, not just one that fails
+   * fast — a hang is the commoner production failure, and this await sits inside
+   * the per-channel write chain, so an unbounded one deadlocks the whole
+   * channel. The bound is `Config.grantReadTimeoutMs`, enforced on the request
+   * itself, and a timeout arrives here as an ordinary read error.
    */
   private async withGrants(msg: InternalMessage): Promise<InternalMessage> {
     if (!this.wallet || msg.attachments?.length) return msg;
 
     try {
-      const attachments = await this.wallet.attachmentsFor(msg.from, {
-        recipients: msg.to ?? [],
-        typeUri: msg.type,
-        body: msg.body,
-      });
+      const attachments = await this.wallet.attachmentsFor(
+        msg.from,
+        {
+          recipients: msg.to ?? [],
+          typeUri: msg.type,
+          body: msg.body,
+        },
+        // The cap left credentials off. Announced at once rather than remembered
+        // for a denial: unlike "nothing covered it", this is never the normal
+        // shape of a message that needs no grant, and the holding that triggers
+        // it will trigger it on every send until someone prunes the wallet.
+        (capped) => this.onGrantMiss?.({ to: msg.to ?? [], type: msg.type, capped }),
+      );
 
       if (attachments.length > 0) {
         return { ...msg, attachments };
@@ -1075,14 +1105,35 @@ export class Layr8Client extends EventEmitter {
     }
   }
 
-  private rememberUnattached(msg: InternalMessage): void {
-    // Oldest out first. A cap rather than a TTL because the only consumer is the
-    // reply to a message we just sent.
-    if (this.unattached.size >= 64) {
-      const oldest = this.unattached.keys().next().value;
-      if (oldest !== undefined) this.unattached.delete(oldest);
+  /**
+   * Evicted by AGE, not by count.
+   *
+   * A count cap dropped the entry that mattered. The denial for a message
+   * arrives within seconds of it, but the cap counted every unattached message
+   * in between — and `withGrants` records EVERY message it attaches nothing to,
+   * which for the agents this feature is aimed at (the ones holding no grants at
+   * all) is every discovery, trust-ping and problem report they send. Sixty-four
+   * of those between the send and its denial and `onGrantMiss` never fired: the
+   * one thing it exists for, lost to traffic that never needed a grant.
+   *
+   * Age bounds the map by SEND RATE × window instead, which is the honest bound
+   * — the entries are small and the window is short, and a burst large enough to
+   * matter would have to arrive inside it.
+   */
+  private rememberUnattached(msg: InternalMessage, now: number = Date.now()): void {
+    // Insertion order is chronological and `now` never goes backwards, so the
+    // stale entries are a prefix: stop at the first live one.
+    for (const [key, rec] of this.unattached) {
+      if (now - rec.at < UNATTACHED_WINDOW_MS) break;
+      this.unattached.delete(key);
     }
-    this.unattached.set(msg.threadId || msg.id, { to: msg.to ?? [], type: msg.type });
+    // Delete first: re-setting an existing key keeps its ORIGINAL position, and
+    // one hot thread id refreshed in place would sit at the front with a fresh
+    // timestamp and stop the prefix scan above from ever reaching the stale
+    // entries behind it.
+    const key = msg.threadId || msg.id;
+    this.unattached.delete(key);
+    this.unattached.set(key, { at: now, to: msg.to ?? [], type: msg.type });
   }
 
   /**
@@ -1098,11 +1149,16 @@ export class Layr8Client extends EventEmitter {
     const code = typeof body.code === "string" ? body.code : "";
     if (!code.includes("authz")) return;
 
+    // `parentThreadId` is the one that matches in production and it is SECOND
+    // only because a peer is free to use either. The node's own denial
+    // (`report_problem.ex`) sets `pthid` — to the denied message's `thid` or, for
+    // a message sent without one, its `id` — and sets no `thid` at all, so
+    // `msg.threadId` is empty on every real denial this SDK will see.
     for (const key of [msg.threadId, msg.parentThreadId]) {
       const hit = key ? this.unattached.get(key) : undefined;
       if (hit) {
         this.unattached.delete(key as string);
-        this.onGrantMiss?.({ ...hit, denialCode: code });
+        this.onGrantMiss?.({ to: hit.to, type: hit.type, denialCode: code });
         return;
       }
     }

@@ -281,8 +281,9 @@ up `onGrantMiss` and the next such incident is one line instead of a day:
 
 ```typescript
 const client = new Layr8Client(logErrors(), {
-  onGrantMiss: ({ to, type, denialCode, error }) => {
+  onGrantMiss: ({ to, type, denialCode, error, capped }) => {
     if (error) console.warn("could not read grants:", error);
+    else if (capped) console.warn(`only ${capped.attached} of ${capped.covering} grants fit`);
     else console.warn(`${denialCode}: sent ${type} to ${to} with NO grant attached`);
   },
 });
@@ -290,9 +291,23 @@ const client = new Layr8Client(logErrors(), {
 
 It fires on the **denial**, not on every send — most DIDComm traffic (discovery,
 trust-ping, problem reports) needs no grant at all, and a diagnostic that fires
-constantly is one nobody reads when it matters. The one exception is a failure to
-*read* the grants, which is announced immediately: it is never normal, and every
-subsequent send is flying blind.
+constantly is one nobody reads when it matters. Two things are announced
+immediately instead, because neither is ever a normal outcome: a failure to
+*read* the grants (every subsequent send is flying blind), and a covering set
+large enough that some of it had to be left off the message.
+
+### If the node stops answering
+
+The credential read that precedes a send is bounded by `grantReadTimeoutMs`
+(2s by default, env `LAYR8_GRANT_READ_TIMEOUT_MS`). On a timeout the message goes
+out **unattached** and `onGrantMiss` is called with the error — the node is the
+authority on whether that message needed a grant, and refusing to send would take
+down calls that never did.
+
+The deadline is not optional politeness. The read runs inside the per-channel
+write chain, which is what keeps outbound writes in call order, so an unbounded
+read would stall every later send on that channel — including ones that carry
+their own attachments and never consult the wallet.
 
 ### A grant issued just now
 

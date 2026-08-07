@@ -1,6 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { resolveConfig, DEFAULT_DID_SPEC, DEFAULT_GRANT_CACHE_MS } from "../src/config.js";
-import type { DidSpec } from "../src/config.js";
+import {
+  resolveConfig,
+  DEFAULT_DID_SPEC,
+  DEFAULT_GRANT_CACHE_MS,
+  DEFAULT_GRANT_READ_TIMEOUT_MS,
+} from "../src/config.js";
+import type { Config, DidSpec, GrantMissInfo } from "../src/config.js";
 
 describe("resolveConfig", () => {
   const originalEnv = { ...process.env };
@@ -165,5 +170,61 @@ describe("grant attachment options", () => {
     // which would re-read the credentials on EVERY message.
     process.env.LAYR8_GRANT_CACHE_MS = "30s";
     expect(resolveConfig(base).grantCacheMs).toBe(DEFAULT_GRANT_CACHE_MS);
+  });
+
+  it("bounds the credential read, from config or the environment", () => {
+    expect(resolveConfig(base).grantReadTimeoutMs).toBe(DEFAULT_GRANT_READ_TIMEOUT_MS);
+    expect(resolveConfig({ ...base, grantReadTimeoutMs: 500 }).grantReadTimeoutMs).toBe(500);
+
+    process.env.LAYR8_GRANT_READ_TIMEOUT_MS = "750";
+    expect(resolveConfig(base).grantReadTimeoutMs).toBe(750);
+  });
+
+  it("ignores a zero or unreadable deadline instead of disabling the read", () => {
+    // Unlike the cache TTL, where zero means "never cache", a zero deadline
+    // would abort every read before it started — an agent that attaches
+    // nothing, which is the exact failure this feature exists to end. A typo
+    // must not be able to produce it.
+    process.env.LAYR8_GRANT_READ_TIMEOUT_MS = "0";
+    expect(resolveConfig(base).grantReadTimeoutMs).toBe(DEFAULT_GRANT_READ_TIMEOUT_MS);
+
+    process.env.LAYR8_GRANT_READ_TIMEOUT_MS = "2s";
+    expect(resolveConfig(base).grantReadTimeoutMs).toBe(DEFAULT_GRANT_READ_TIMEOUT_MS);
+
+    // An exported-but-empty variable is "unset", as it is for the booleans.
+    process.env.LAYR8_GRANT_READ_TIMEOUT_MS = "";
+    expect(resolveConfig(base).grantReadTimeoutMs).toBe(DEFAULT_GRANT_READ_TIMEOUT_MS);
+  });
+});
+
+describe("what a caller can WRITE against", () => {
+  // A compile-time claim, not a runtime one. `Config.onGrantMiss` was declared
+  // without `denialCode` while the client passed it and the README's example
+  // destructured it: the callback worked perfectly and the code copied out of
+  // the README did not compile. Nothing caught it because `tsconfig.json`
+  // excluded `tests`, and this file's own helpers were typed
+  // `Record<string, unknown>`, which erases the check even when it runs.
+  //
+  // This test asserts almost nothing at runtime. Its job is to be TYPE-CHECKED —
+  // `npm run lint` now covers `tests/`, so a field dropped from `GrantMissInfo`
+  // fails the build here.
+  it("sees every field the client actually passes", () => {
+    const seen: string[] = [];
+
+    const cfg: Config = {
+      nodeUrl: "ws://localhost:4000",
+      apiKey: "test-api-key",
+      agentDid: "did:web:example.com:agents:test",
+      grantReadTimeoutMs: 2_000,
+      // Exactly the README's example.
+      onGrantMiss: ({ to, type, denialCode, error, capped }) => {
+        seen.push(String(to), type, String(denialCode), String(error), String(capped?.covering));
+      },
+    };
+
+    const info: GrantMissInfo = { to: ["did:web:example.com:agents:peer"], type: "x/1.0/y" };
+    cfg.onGrantMiss?.(info);
+
+    expect(seen).toHaveLength(5);
   });
 });
