@@ -1,32 +1,29 @@
-// Space watch — LAYR8-869/DEBT-055. Cross-language contract:
-// ~/Developments/contracts/sdk-space-watch.md.
+// Space watch — poll, diff and notify on "does my MCP tool surface still look
+// the same."
 //
-// The broker (`mcp/src/broker/{wallet.ts,discovery.ts,daemon.ts}`) and Loom
-// (`agents/loom/lib/loom/mcp/catalog.ex`) each grew their own poll + diff +
-// notify loop for "does my MCP tool surface still look the same." Both watch
-// two independent signals — a wallet (VG/credential set) and a resource set
+// Two independent signals — a wallet (VG/credential set) and a resource set
 // (Space directory MCP Instance cards) — polled, not pushed, because nothing
-// on the wire tells an SDK "your wallet changed" or "a resource came up."
-// `SpaceWatcher` is the one place that mechanism lives for Node/TypeScript
-// consumers; `layr8` (elixir_sdk)'s `Layr8.SpaceWatcher` GenServer is the
-// equivalent for Elixir. What a "change" MEANS to notify (an MCP wire
-// notification for the broker, a stale-cache flag for Loom) stays entirely a
-// consumer decision — this module only owns poll/diff/debounce.
+// on the wire tells an SDK "your wallet changed" or "a resource came up." That
+// absence is the reason this exists: since it is on us to notice, every Layr8
+// SDK should notice on the same terms, and each ships this watcher on the same
+// semantics. What a "change" MEANS to do about it (an MCP wire notification, a
+// stale-cache flag) stays entirely a consumer decision — this module only owns
+// poll/diff/debounce.
 //
 // Signature computation: `SpaceWatcher` is generic over the fetched value (`W`
 // for wallet, `R` for resources) rather than assuming any particular domain
-// shape (a `Cred[]`, a directory card list, …) — bundling that in would tie
-// the watcher to `mcp`'s VG/discovery model and make it useless to any other
-// consumer. The default `walletSignature`/`resourceSignature` — this module's
+// shape (a credential list, a directory card list, …) — bundling that in would
+// tie the watcher to one consumer's VG/discovery model and make it useless to
+// the others. The default `walletSignature`/`resourceSignature` — this module's
 // exported `orderIndependentSignature` — covers the common case where the
 // fetched value already IS the list of stable ids (`string[]`): sorted,
-// deduped, joined. A caller whose fetched value is a richer object (the
-// broker's `Cred[]`, resource objects with both `key` and `did`) passes its
-// own `walletSignature`/`resourceSignature` reducer; the watcher only ever
-// compares the resulting strings for equality and hands the ORIGINAL fetched
-// value to the change callback, so the callback still gets full fidelity (the
-// broker's `onResourcesChange` needs the whole `Resource[]` to update its
-// routing table, not just the signature it changed to).
+// deduped, joined. A caller whose fetched value is a richer object (credential
+// records, resource objects with both `key` and `did`) passes its own
+// `walletSignature`/`resourceSignature` reducer; the watcher only ever compares
+// the resulting strings for equality and hands the ORIGINAL fetched value to
+// the change callback, so the callback still gets full fidelity — an
+// `onResourcesChange` that has to update a routing table needs the whole
+// resource list, not just the signature it changed to.
 
 /** Sorted, deduped, comma-joined identity of a set of ids — order-independent. */
 export function orderIndependentSignature(items: readonly string[]): string {
@@ -84,8 +81,8 @@ const DEFAULT_RESOURCE_POLL_MS = 60_000;
  * card that comes straight back) as a real teardown, and acting on it strips
  * every resource-derived tool from every live session. Anything non-empty
  * applies at once; so does an empty result when there was nothing to lose.
- * Ported verbatim from the broker's `acceptsDiscovery`
- * (`mcp/src/broker/daemon.ts`).
+ * Anything non-empty applies at once; so does an empty result when there was
+ * nothing to lose.
  */
 export function acceptsResourcePoll(isEmpty: boolean, hadResources: boolean, emptyStreak: number): boolean {
   return !isEmpty || !hadResources || emptyStreak >= 2;
@@ -94,9 +91,8 @@ export function acceptsResourcePoll(isEmpty: boolean, hadResources: boolean, emp
 /**
  * Watches two independent signals — a wallet and a resource set — on
  * independent poll intervals, diffs each against its own last-accepted
- * signature, and calls back on a real change. See the contract at
- * `~/Developments/contracts/sdk-space-watch.md` for the full semantics this
- * implements; this class is the boundary-tested reference.
+ * signature, and calls back on a real change. Every Layr8 SDK implements the
+ * same semantics; this class is the boundary-tested reference for them.
  */
 export class SpaceWatcher<W = string[], R = string[]> {
   private readonly opts: Required<

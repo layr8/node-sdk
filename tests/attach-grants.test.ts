@@ -374,10 +374,10 @@ describe("what it must NOT do", () => {
 
   it("DOES attach a grant whose allowlist does not name this call", async () => {
     // The real credential allows `search_emails` and `read_email`, not
-    // `send_email` — and it is attached anyway. `grant.rego` allows on the first
+    // `send_email` — and it is attached anyway. The node's policy allows on the first
     // passing grant and ignores the rest, so over-attaching is free; withholding
     // is what costs a working call, invisibly. The tool allowlist is not a
-    // policy input at all: helix evaluates `constraints.rego` by grant id.
+    // policy input at all: the node evaluates `constraints.rego` by grant id.
     const c = await connected();
 
     await sent(c, {

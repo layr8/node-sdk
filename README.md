@@ -262,9 +262,8 @@ empty polls (a directory blip reads identically to a teardown on the first
 one); the wallet signal does not debounce empty. A fetch error is reported via
 `onError` and never wipes the retained signature — it just retries next poll.
 
-See [`contracts/sdk-space-watch.md`](https://github.com/layr8/contracts/blob/main/sdk-space-watch.md)
-for the full cross-language behavioral contract (the `layr8` hex package
-implements the same semantics for Elixir consumers).
+Every Layr8 SDK implements the same semantics, so a caller sees a change at the
+same latency regardless of which one it is built on.
 
 ## Configuration
 

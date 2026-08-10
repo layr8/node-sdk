@@ -33,8 +33,8 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
   cold start is not a change. `refreshWallet()`/`refreshResources()` force an
   immediate out-of-cycle check outside the poll interval.
 
-  See `contracts/sdk-space-watch.md` for the full cross-language behavioral
-  contract this implements.
+  Every Layr8 SDK implements the same semantics, so a caller sees a change at
+  the same latency regardless of which one it is built on.
 
 - `restTimeoutMs` (default 30s, env `LAYR8_REST_TIMEOUT_MS`) — a deadline on
   **every** credential and presentation call, plus a per-call `timeoutMs` on each
@@ -119,7 +119,7 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
   read the slower, previously arrived as `[B, A]`.
 
 - A grant whose scope names a resource by **segment prefix** is now attached.
-  `structure_v2.rego` matches `tables` against `tables/customers` (and not
+  The node's policy matches `tables` against `tables/customers` (and not
   against `tables_archive`); this side compared for equality only, so it withheld
   a credential the policy would have honoured — the expensive direction, because
   the failure is a silent denial.
