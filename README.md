@@ -225,6 +225,47 @@ await peer.call("tools/call", { name: "…", arguments: { /* … */ } });
 reply throws `McpError` (`.code`, `.message`, `.data`). `mcp()` must be called
 before `connect()` and is idempotent per base.
 
+## Space Watch
+
+`SpaceWatcher` watches two independent signals that nothing on the wire pushes
+a change for — your held VG/credential set (the "wallet") and the Space's live
+resource set (e.g. MCP Instance directory cards) — polling each on its own
+interval and calling back only on a real change:
+
+```typescript
+import { SpaceWatcher } from "@layr8/sdk";
+
+const watcher = new SpaceWatcher({
+  fetchWallet: async () => fetchMyCredentialIds(),      // string[] by default
+  fetchResources: async () => discoverMyResourceDids(), // string[] by default
+  onWalletChange: (wallet) => console.log("wallet changed:", wallet),
+  onResourcesChange: (resources) => console.log("resources changed:", resources),
+  // walletPollMs: 15_000 (default), resourcePollMs: 60_000 (default)
+});
+
+watcher.start();
+// ... later, when you already know a change is imminent:
+await watcher.refreshResources();
+watcher.stop();
+```
+
+Both `fetchWallet`/`fetchResources` may return any shape, not just `string[]` —
+pass `walletSignature`/`resourceSignature` reducers to compute an
+order-independent identity string from your own domain object (a `Cred[]`, a
+richer resource record with both a key and a DID, …); the default reducer
+(`orderIndependentSignature`, exported alongside `SpaceWatcher`) only handles
+the case where the fetched value already IS the list of ids. The callback
+always receives the full fetched value, not just its signature.
+
+An empty resource result only counts as a real change after **two consecutive**
+empty polls (a directory blip reads identically to a teardown on the first
+one); the wallet signal does not debounce empty. A fetch error is reported via
+`onError` and never wipes the retained signature — it just retries next poll.
+
+See [`contracts/sdk-space-watch.md`](https://github.com/layr8/contracts/blob/main/sdk-space-watch.md)
+for the full cross-language behavioral contract (the `layr8` hex package
+implements the same semantics for Elixir consumers).
+
 ## Configuration
 
 Configuration can be set explicitly or via environment variables. Environment variables are used as fallbacks when the corresponding field is empty or undefined.
