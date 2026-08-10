@@ -3,10 +3,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { SpaceWatcher, orderIndependentSignature, acceptsResourcePoll } from "../src/space-watch.js";
 
 /**
- * Space watch — LAYR8-869/DEBT-055. Boundary test for
- * ~/Developments/contracts/sdk-space-watch.md: dual poll, order-independent
- * signature diff, the resource empty-result debounce (ported from the
- * broker's `acceptsDiscovery`), and error handling that never wipes retained
+ * Space watch — boundary test for the semantics every Layr8 SDK's watcher
+ * shares: dual poll, order-independent signature diff, the resource
+ * empty-result debounce, and error handling that never wipes retained
  * state. Uses vitest's fake timers rather than the watcher's injectable timer
  * hooks — `vi.useFakeTimers()` swaps the same globals the watcher defaults
  * to, so no extra plumbing is needed to make both poll intervals

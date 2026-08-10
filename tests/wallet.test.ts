@@ -106,10 +106,10 @@ describe("selecting the covering set", () => {
   });
 
   it("honours a bare SEGMENT prefix, as the policy does", () => {
-    // `structure_v2.rego`'s `_resource_ok` has a third clause this side was
+    // the node's policy has a third clause this side was
     // missing: a bare `tables` covers `tables/customers`, requiring the next
     // character to be `/` so it does not also cover `tables_archive`
-    // (`structure_v2_test.rego`: `test_resource_segment_prefix`,
+    // (segment prefix vs non-segment prefix,
     // `test_resource_non_segment_no_match`).
     //
     // The omission pointed the expensive way — withholding a grant the policy
@@ -125,14 +125,14 @@ describe("selecting the covering set", () => {
   });
 
   describe("the tool allowlist is NOT a filter here", () => {
-    // `grant.rego` allows on the first passing grant and ignores the rest, so an
+    // The node's policy allows on the first passing grant and ignores the rest, so an
     // extra credential on the wire costs nothing — while one withheld costs a
     // working call, invisibly, as the same "no grant covers this call" this
     // exists to end.
     //
     // An earlier version filtered on `credentialSubject.grant.tools`, reasoning
     // that the grant's embedded rego would deny anyway. It was the only rule
-    // stricter than the policy, and no policy reads `grant.tools` at all — helix
+    // stricter than the policy, and no policy reads `grant.tools` at all — the node
     // evaluates `constraints.rego`, keyed by grant id, which this side cannot
     // reproduce. The filter read `body.params.name` protocol-blind, so any
     // JSON-RPC-shaped body could drop a grant the node would have honoured.
@@ -184,7 +184,7 @@ describe("what goes on the wire stays bounded and distinguishable", () => {
     // silent drop and an `e.m.authz.denied` with nothing to look at.
     //
     // A RANKING, not a filter. Nothing is withheld that the cap has room for:
-    // `grant.tools` is not a policy input anywhere — helix evaluates
+    // `grant.tools` is not a policy input anywhere — the node evaluates
     // `constraints.rego` keyed by grant id — and an earlier version that
     // filtered on it dropped grants the node would have honoured.
 
@@ -288,7 +288,7 @@ describe("the attachment shape", () => {
     // `media_type` is the only thing the node's extractor filters on: exactly
     // `application/vc+jwt` is kept, everything else is discarded before the data
     // is looked at, and the denial that follows is byte-for-byte the one you get
-    // for attaching nothing. A partner team lost a day to that with a
+    // for attaching nothing, which is why the mistake is expensive to find: a
     // hand-built `application/vp+jwt`.
     //
     // `data.base64` is NOT part of that rule — the extractor falls back to it

@@ -12,10 +12,10 @@
  * "no grant covers this call" — a message that reads as "your grant is
  * misconfigured" when the truth is "no credential was ever put on the wire".
  *
- * That misreading is the expensive part. Two teams spent days on it: checking
- * the grant, the Space policy, whether the PDP expanded `messageTypes: ["*"]`.
- * The sender is the only party that knows it attached nothing, so the sender is
- * the only one that can say so — see `onGrantMiss`.
+ * That misreading is the expensive part: the denial names a grant, so it sends
+ * you to check a grant that is fine. The sender is the only party that knows it
+ * attached nothing, so the sender is the only one that can say so — see
+ * `onGrantMiss`.
  *
  * ## The attachment shape is load-bearing
  *
@@ -23,8 +23,8 @@
  * keeps attachments whose media type is exactly `"application/vc+jwt"` and drops
  * every other one SILENTLY, before looking at the data at all. A VP
  * (`application/vp+jwt`) is discarded on that rule, and the denial that follows
- * is byte-for-byte the one you get for attaching nothing — which is how a
- * partner team spent a day looking at a grant that was fine.
+ * is byte-for-byte the one you get for attaching nothing — which is why the
+ * mistake is expensive to find.
  *
  * `data.jws` is the primary place the JWS is read from, and what this SDK
  * writes. `data.base64` is NOT dropped: the extractor falls back to it and
@@ -36,7 +36,7 @@
  *
  ## Over-attaching is free; under-attaching is not
  *
- * `grant.rego` allows on the FIRST passing grant and simply ignores the rest, so
+ * The node's policy allows on the FIRST passing grant and ignores the rest, so
  * an extra credential on the wire costs nothing. A credential withheld costs a
  * working call, and the failure is invisible — it presents as the same "no grant
  * covers this call" this file exists to end.
@@ -47,14 +47,14 @@
  * and the only place the change carried downside risk: `toolNameOf` read
  * `body.params.name` protocol-blind, so ANY message with a JSON-RPC-shaped body
  * — which is most of them — could drop a grant the node would have honoured. No
- * policy reads `grant.tools` at all; helix evaluates
+ * policy reads `grant.tools` at all; the node evaluates
  * `credentialSubject.constraints.rego`, keyed by grant id, which this side
  * cannot reproduce and should not try to.
  *
  * ## Selection mirrors the policy, and deliberately errs wide
  *
- * `covers()` mirrors helix's `structure_v2.rego`: some scope entry must match
- * the protocol, the message type and the resource. What this does NOT do is
+ * `covers()` mirrors the node's authorization policy: some scope entry must
+ * match the protocol, the message type and the resource. What this does NOT do is
  * decide anything the PDP decides — revocation and validity windows are checked
  * there, against sources this side cannot see. Attaching a revoked or expired
  * grant costs one denial; withholding one because a local cache thought it was
@@ -129,7 +129,7 @@ export function toolNameOf(body: unknown): string | undefined {
   return typeof params?.name === "string" ? params.name : undefined;
 }
 
-// ── structure_v2.rego mirror ──
+// ── policy mirror ──
 
 function protocolMatches(p: string | undefined, want: string): boolean {
   return p === "*" || p === want;
@@ -140,8 +140,8 @@ function messageTypeMatches(types: string[] | undefined, want: string): boolean 
 }
 
 /**
- * The three ways a scope's `resource` can cover a message's, in the order
- * `structure_v2.rego`'s `_resource_ok` states them:
+ * The three ways a scope's `resource` can cover a message's, in the order the
+ * node's policy states them:
  *
  *   1. equal;
  *   2. `foo/*` covers anything under `foo/` — note the rego strips only the
@@ -149,8 +149,7 @@ function messageTypeMatches(types: string[] | undefined, want: string): boolean 
  *      cover `foobar`;
  *   3. a bare `foo` covers `foo/bar` — a SEGMENT prefix, requiring the next
  *      character to be `/` so `tables` covers `tables/customers` but not
- *      `tables_archive` (`structure_v2_test.rego`
- *      `test_resource_segment_prefix` / `test_resource_non_segment_no_match`).
+ *      `tables_archive`.
  *
  * Clause 3 was missing here, and its absence pointed the wrong way: this side
  * withheld a grant the policy would have honoured, which is the failure that
@@ -226,7 +225,8 @@ export function selectFor(
   //
   // Naming this tool ranks first, naming no tool at all (unrestricted) second,
   // naming only OTHER tools last — last, not excluded: `grant.tools` is not a
-  // policy input anywhere, helix evaluates `constraints.rego` keyed by grant id,
+  // policy input anywhere, the node evaluates `constraints.rego` keyed by grant
+  // id,
   // and an earlier version that filtered on it dropped grants the node would
   // have honoured.
   const toolRank = (c: HeldCredential): number => {
