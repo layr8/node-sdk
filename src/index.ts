@@ -71,3 +71,9 @@ export type {
   SignPresentationOptions,
   VerifyPresentationOptions,
 } from "./presentations.js";
+
+// Space watch — dual poll + signature-diff + notify for "does my MCP tool
+// surface still look the same" (wallet + resource set). See
+// contracts/sdk-space-watch.md for the cross-language behavioral contract.
+export { SpaceWatcher, orderIndependentSignature, acceptsResourcePoll } from "./space-watch.js";
+export type { SpaceWatcherOptions, SpaceWatchSignal } from "./space-watch.js";

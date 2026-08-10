@@ -6,7 +6,35 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-08-10 (dev — not yet published)
+
 ### Added
+
+- `SpaceWatcher` (`src/space-watch.ts`) — a dual-signal poll/diff/notify
+  watcher for "does my MCP tool surface still look the same," so consumers
+  (the `mcp` broker, and `layr8` hex's `Layr8.SpaceWatcher` on the Elixir
+  side) stop each reimplementing the same loop. Watches a wallet (VG/
+  credential set) on a 15s default interval and a resource set (Space
+  directory MCP Instance cards) on a 60s default interval, independently:
+  each signal is reduced to an order-independent signature
+  (`orderIndependentSignature`, sorted/deduped/joined) and diffed against its
+  own last-accepted value.
+
+  A fetch error never wipes the retained signature — it's logged via the
+  optional `onError` callback and retried next poll, so a transient wallet-
+  read or directory failure never reads as "everything disappeared." An
+  empty resource result debounces: it's only accepted after two consecutive
+  empty polls (ported from the broker's `acceptsDiscovery`), since a
+  directory answering with nothing is just as likely to be a keepalive blip
+  as a real teardown; growing the set, or shrinking it to a still-non-empty
+  set, applies immediately either direction. The wallet signal does **not**
+  debounce empty — an empty wallet is a real answer, not a blip. The first
+  successful poll per signal seeds the baseline silently (no callback) — a
+  cold start is not a change. `refreshWallet()`/`refreshResources()` force an
+  immediate out-of-cycle check outside the poll interval.
+
+  See `contracts/sdk-space-watch.md` for the full cross-language behavioral
+  contract this implements.
 
 - `restTimeoutMs` (default 30s, env `LAYR8_REST_TIMEOUT_MS`) — a deadline on
   **every** credential and presentation call, plus a per-call `timeoutMs` on each
