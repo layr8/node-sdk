@@ -97,6 +97,13 @@ scan() {
   [ -n "$hit" ] && report "$label" "$(printf '%s' "$hit" | sed 's/^/    /')"
 }
 
+# Case-sensitive variant, for patterns whose case carries meaning.
+scanC() {
+  local label="$1" pattern="$2" hit
+  hit="$(grep -nE "$pattern" "$subject" 2>/dev/null | head -5)" || true
+  [ -n "$hit" ] && report "$label" "$(printf '%s' "$hit" | sed 's/^/    /')"
+}
+
 scan "developer home directory"  '(^|[^[:alnum:]])(/Users/|/home/)[a-z][a-z0-9._-]+/'
 # The tilde form, which is how the original leak was written. Paths under a
 # dotted directory (`~/.npmrc`, `~/.config/…`) are ordinary user instructions
@@ -104,7 +111,10 @@ scan "developer home directory"  '(^|[^[:alnum:]])(/Users/|/home/)[a-z][a-z0-9._
 scan "home-relative path"        '~/[A-Za-z][A-Za-z0-9._-]*/'
 scan "private network address"   '(^|[^0-9.])(10\.[0-9]{1,3}|192\.168|172\.(1[6-9]|2[0-9]|3[01]))\.[0-9]{1,3}\.[0-9]{1,3}'
 scan "internal hostname"         '[a-z0-9-]+\.(internal\.[a-z0-9.-]+|svc\.cluster\.local)'
-scan "issue tracker identifier"  '(^|[^[:alnum:]])LAYR8-[0-9]{1,6}([^0-9]|$)'
+# Case-sensitive, unlike the rest. A ticket identifier is upper-case; the
+# package name is not. Matched case-insensitively, a lower-case package name
+# followed by a version number reads as a ticket and fails every build.
+scanC "issue tracker identifier" '(^|[^[:alnum:]])LAYR8-[0-9]{1,6}([^0-9]|$)'
 # Not preceded by a dot: `credentialSubject.constraints.rego` is a field path
 # inside a credential, which every user of this library can see, and flagging it
 # would make the check fail on correct documentation.

@@ -216,7 +216,6 @@ jobs:
 
       # Folded in rather than given its own runner — it is one API call, and
       # re-triggering the gate is harmless.
-      # hygiene-ok: this is the actual dispatch target, not a doc reference.
       - name: Trigger the cross-language compatibility gate
         run: |
           GATE_REPO=layr8/compat-suite  # hygiene-ok: dispatch target, not a doc reference
