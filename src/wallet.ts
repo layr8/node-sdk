@@ -436,3 +436,5 @@ export class Wallet {
     );
   }
 }
+
+// Probe: does a matched internal name survive the log? References helix.
