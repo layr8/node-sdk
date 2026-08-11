@@ -154,7 +154,7 @@ jobs:
       # taken back. This is the last point at which that is still preventable.
       - name: Check the packed artifact for internal references
         env:
-          INTERNAL_NAMES: ${{ secrets.INTERNAL_NAMES }}
+          INTERNAL_NAMES: ${{ vars.INTERNAL_NAMES }}
         run: |
           TARBALL=$(npm pack --silent)
           ./scripts/check-public-hygiene.sh --tarball "$TARBALL"

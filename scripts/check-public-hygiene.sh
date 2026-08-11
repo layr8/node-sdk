@@ -30,6 +30,10 @@
 #   be the kind of disclosure this script prevents. Without it the named check
 #   is skipped, and says so rather than passing quietly.
 #
+#   In CI that comes from a repository VARIABLE, not a secret. The names are not
+#   credentials, and a secret's value is masked in the log — which turns the one
+#   line you need to read, the matched name, into ***.
+#
 # Escape hatch: a line containing `hygiene-ok:` is exempt. It stays in the diff
 # on purpose, so a reviewer sees the claim being made.
 
@@ -122,29 +126,61 @@ scan "policy source file"        '(^|[^a-zA-Z0-9._])[a-z0-9_]+\.rego([^a-z0-9]|$
 scan "cloud account identifier"  '(arn:aws:[a-z0-9-]+:[a-z0-9-]*:[0-9]{12}:|(^|[^0-9])[0-9]{12}\.dkr\.ecr\.)'
 
 # --------------------------------------------------------------------- named
+#
+# Whether a matched name may be printed. A public repository's workflow logs are
+# public too, and "that word is on our internal roster" is something the diff
+# alone does not say — so in Actions the name, the line and the file all stay
+# out of the output, and the developer reproduces locally, where it is private.
+# Everywhere else, print everything: that is where the check is useful.
+quiet_names=0
+[ -n "${GITHUB_ACTIONS:-}" ] && quiet_names=1
+[ "${HYGIENE_SHOW_NAMES:-}" = 1 ] && quiet_names=0
+
 if [ -n "${INTERNAL_NAMES:-}" ]; then
   checked=0
+  named_hits=0
   while IFS= read -r name; do
     name="$(printf '%s' "$name" | tr -d '[:space:]')"
     [ -n "$name" ] || continue
     [ "${#name}" -ge 4 ] || continue
     checked=$((checked + 1))
     hit="$(grep -inE "(^|[^[:alnum:]_-])${name}([^[:alnum:]_-]|\$)" "$subject" 2>/dev/null | head -3)" || true
-    [ -n "$hit" ] && report "internal system name" "$(printf '%s' "$hit" | sed 's/^/    /')"
+    [ -n "$hit" ] || continue
+    named_hits=$((named_hits + 1))
+    if [ "$quiet_names" = 1 ]; then
+      fail=1
+    else
+      report "internal system name" "$(printf '%s' "$hit" | sed 's/^/    /')"
+    fi
   done <<< "$INTERNAL_NAMES"
   echo "hygiene: checked $checked internal names."
+
+  if [ "$quiet_names" = 1 ] && [ "$named_hits" -gt 0 ]; then
+    printf '::error::%s internal system name(s) in the added lines.\n' "$named_hits"
+    echo "  The name, the line and the file are not printed here on purpose: this"
+    echo "  repository is public and so is this log."
+    echo
+    echo "  To see which name and where, run the same check locally, where the"
+    echo "  output goes only to you:"
+    echo
+    printf '    INTERNAL_NAMES="$(gh variable get INTERNAL_NAMES --repo %s)" \\\n' "${GITHUB_REPOSITORY:-<org>/<repo>}"
+    echo "      ./scripts/check-public-hygiene.sh --diff origin/main"
+    echo
+    echo "  The team's pre-commit hooks run the same check, with full detail,"
+    echo "  before you commit. Ask a maintainer where to get them."
+  fi
 else
   echo "::notice::INTERNAL_NAMES is not set, so internal service and repository"
   echo "::notice::names were not checked. Structural patterns were. Set the"
-  echo "::notice::INTERNAL_NAMES repository secret to enable the named check."
+  echo "::notice::INTERNAL_NAMES repository variable to enable the named check."
 fi
 
 if [ "$fail" = 1 ]; then
   cat >&2 <<'EOF'
 
-This repository is public. The text above names something that only resolves
-inside the organisation: a reader outside it cannot follow the reference, and it
-discloses the shape of infrastructure that is not published.
+This repository is public. Something in the added lines names a system that
+only resolves inside the organisation: a reader outside it cannot follow the
+reference, and it discloses the shape of infrastructure that is not published.
 
 Describe the behaviour instead of where it lives. "the node's authorization
 policy allows on the first passing grant" says everything a user needs; naming
