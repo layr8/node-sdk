@@ -30,6 +30,10 @@
 #   be the kind of disclosure this script prevents. Without it the named check
 #   is skipped, and says so rather than passing quietly.
 #
+#   In CI that comes from a repository VARIABLE, not a secret. The names are not
+#   credentials, and a secret's value is masked in the log — which turns the one
+#   line you need to read, the matched name, into ***.
+#
 # Escape hatch: a line containing `hygiene-ok:` is exempt. It stays in the diff
 # on purpose, so a reviewer sees the claim being made.
 
@@ -136,7 +140,7 @@ if [ -n "${INTERNAL_NAMES:-}" ]; then
 else
   echo "::notice::INTERNAL_NAMES is not set, so internal service and repository"
   echo "::notice::names were not checked. Structural patterns were. Set the"
-  echo "::notice::INTERNAL_NAMES repository secret to enable the named check."
+  echo "::notice::INTERNAL_NAMES repository variable to enable the named check."
 fi
 
 if [ "$fail" = 1 ]; then

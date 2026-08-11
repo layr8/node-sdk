@@ -25,10 +25,10 @@ jobs:
 
       - name: Check added lines
         env:
-          # Absent on pull requests from forks, which cannot read secrets. The
-          # structural checks still run there; the named check reports that it
-          # was skipped rather than passing quietly, and the same pull request
-          # is checked again with the secret once it reaches main.
-          INTERNAL_NAMES: ${{ secrets.INTERNAL_NAMES }}
+          # A repository variable, not a secret. These are names, not
+          # credentials, and GitHub masks a secret's value in the log — which
+          # replaced the matched name with *** in the one output that has to be
+          # readable. Measured on layr8/node-sdk#53.
+          INTERNAL_NAMES: ${{ vars.INTERNAL_NAMES }}
         run: |
           ./scripts/check-public-hygiene.sh --diff "origin/${{ github.base_ref }}"
