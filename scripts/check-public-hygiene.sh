@@ -15,6 +15,7 @@
 #   --diff <base>      added lines of HEAD against <base>   (pull requests)
 #   --tree             every tracked file                   (whole-repo audit)
 #   --tarball <file>   contents of a packed artifact        (before publishing)
+#                      accepts a .tgz/.tar.gz or a .whl/.zip
 #
 # Two classes of check:
 #
@@ -61,8 +62,12 @@ case "$MODE" in
     done > "$subject" || true
     ;;
   tarball)
-    [ -f "$ARG" ] || { echo "no such tarball: $ARG" >&2; exit 64; }
-    mkdir -p "$work/x" && tar xzf "$ARG" -C "$work/x"
+    [ -f "$ARG" ] || { echo "no such artifact: $ARG" >&2; exit 64; }
+    mkdir -p "$work/x"
+    case "$ARG" in
+      *.whl|*.zip) unzip -qq "$ARG" -d "$work/x" ;;
+      *)           tar xzf "$ARG" -C "$work/x" ;;
+    esac
     # File names matter as much as contents: a path is a leak whether it is
     # inside a comment or is the name of the file shipped.
     (cd "$work/x" && find . -type f -print) > "$subject"
