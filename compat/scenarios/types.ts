@@ -1,6 +1,6 @@
 /**
  * Shared types for compat scenarios.
- * Matches the contract defined by the compat-suite orchestrator.
+ * Matches the contract defined by the cross-language compatibility orchestrator.
  */
 
 export interface ScenarioContext {
