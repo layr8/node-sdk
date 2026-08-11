@@ -166,8 +166,8 @@ if [ -n "${INTERNAL_NAMES:-}" ]; then
     printf '    INTERNAL_NAMES="$(gh variable get INTERNAL_NAMES --repo %s)" \\\n' "${GITHUB_REPOSITORY:-<org>/<repo>}"
     echo "      ./scripts/check-public-hygiene.sh --diff origin/main"
     echo
-    echo "  The pre-commit hooks in dev-shared (agentic-dev/public-repo-guard)"
-    echo "  run the same check with full detail before you commit."
+    echo "  The team's pre-commit hooks run the same check, with full detail,"
+    echo "  before you commit. Ask a maintainer where to get them."
   fi
 else
   echo "::notice::INTERNAL_NAMES is not set, so internal service and repository"
