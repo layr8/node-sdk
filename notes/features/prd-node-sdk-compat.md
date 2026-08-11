@@ -234,7 +234,7 @@ have two possible homes:
 
 ### bin/compat.ts
 
-Same runner contract as defined in compat-suite PRD:
+Same runner contract as defined in the orchestrator's PRD:
 
 ```
 compat --mode sender|receiver --scenario <name> --node <url> --did <did>
@@ -247,7 +247,7 @@ scenario module, calls `runSender` or `runReceiver`.
 ### --list-scenarios
 
 Reads the `scenarios/` directory, returns JSON array of scenario names.
-Self-describing — compat-suite discovers what this version supports.
+Self-describing — the orchestrator discovers what this version supports.
 
 ### Dockerfile
 
@@ -282,7 +282,7 @@ the published artifact.
 }
 ```
 
-Layer 1 resolves against `cloud-node-versions.txt` from compat-suite
+Layer 1 resolves against `cloud-node-versions.txt` from the compatibility orchestrator
 (fetched as raw GitHub file) to determine which versions to spin up.
 
 ## CI Workflow Changes
@@ -320,9 +320,9 @@ jobs:
     needs: [build, compat-layer1]
 
   compat-gate:
-    # Layer 2: call compat-suite gate workflow
+    # Layer 2: call the compatibility orchestrator gate workflow
     needs: publish-compat-image
-    uses: layr8/compat-suite/.github/workflows/gate.yml@main
+    uses: layr8/the compatibility orchestrator/.github/workflows/gate.yml@main
     with:
       sdk: node
       version: ${{ needs.build.outputs.version }}
@@ -333,7 +333,7 @@ jobs:
 1. Build + unit test
 2. Layer 1 compat (same SDK, in-process, real cloud-nodes)
 3. Publish SDK to npm + publish compat image to ghcr.io
-4. Layer 2 gate (compat-suite runs cross-language matrix)
+4. Layer 2 gate (the compatibility orchestrator runs cross-language matrix)
 
 Layer 2 runs AFTER publishing because it needs the compat image
 to exist on ghcr.io. If the gate fails, the SDK is already

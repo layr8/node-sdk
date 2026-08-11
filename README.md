@@ -788,7 +788,10 @@ LAYR8_API_KEY=your-key npx tsx examples/durable-handler.ts
 
 ## Compat Testing
 
-The `compat/` directory implements cross-language compatibility testing for the [compat-suite](https://github.com/layr8/compat-suite) orchestrator.
+The `compat/` directory implements cross-language compatibility testing. It is
+driven by an orchestrator that runs every SDK against the same scenario matrix;
+the contract that orchestrator expects is described below and in
+`compat/scenarios/types.ts`.
 
 ### Structure
 
@@ -796,7 +799,7 @@ The `compat/` directory implements cross-language compatibility testing for the 
 compat/
 ├── scenarios/       # Core scenario logic (echo, pass, wildcard, disconnected)
 ├── tests/           # Layer 1: vitest tests with mock Phoenix server
-├── bin/             # Layer 2: CLI adapter for compat-suite orchestrator
+├── bin/             # Layer 2: CLI adapter for the orchestrator
 ├── Dockerfile       # Builds ghcr.io/layr8/node-sdk/compat:{version}
 └── cloud-nodes.json # Supported cloud-node version declaration
 ```
@@ -819,7 +822,7 @@ npm run compat:test
 2. Layer 1 compat tests (mock server, no Docker)
 3. Publish SDK to npm
 4. Build + push compat image to ghcr.io
-5. Trigger compat-suite gate (cross-language matrix)
+5. Trigger the cross-language compatibility gate
 
 ## Development
 

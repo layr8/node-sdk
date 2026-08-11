@@ -1,0 +1,34 @@
+name: Public hygiene
+
+# Fails a pull request that adds text which only resolves inside the
+# organisation. See scripts/check-public-hygiene.sh for what is checked and why.
+#
+# Added lines only, against the merge base — deleting a leak is never a failure,
+# and existing text is not this check's business. A whole-repo audit is
+# `scripts/check-public-hygiene.sh --tree`, run by hand.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # The script diffs against the merge base, which needs both sides.
+          fetch-depth: 0
+
+      - name: Check added lines
+        env:
+          # Absent on pull requests from forks, which cannot read secrets. The
+          # structural checks still run there; the named check reports that it
+          # was skipped rather than passing quietly, and the same pull request
+          # is checked again with the secret once it reaches main.
+          INTERNAL_NAMES: ${{ secrets.INTERNAL_NAMES }}
+        run: |
+          ./scripts/check-public-hygiene.sh --diff "origin/${{ github.base_ref }}"

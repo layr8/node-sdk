@@ -225,7 +225,8 @@ export function selectFor(
   //
   // Naming this tool ranks first, naming no tool at all (unrestricted) second,
   // naming only OTHER tools last — last, not excluded: `grant.tools` is not a
-  // policy input anywhere, the node evaluates `constraints.rego` keyed by grant
+  // policy input anywhere, the node evaluates the grant's own
+  // `credentialSubject.constraints.rego` keyed by grant
   // id,
   // and an earlier version that filtered on it dropped grants the node would
   // have honoured.

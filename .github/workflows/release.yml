@@ -148,6 +148,17 @@ jobs:
       - name: Build
         run: npm run build
 
+      # The artifact, not the source tree. Doc comments compile into
+      # `dist/*.d.ts`, so 0.2.2 and 0.2.3 shipped internal references that a
+      # source scan would not have seen — and once on npm they could not be
+      # taken back. This is the last point at which that is still preventable.
+      - name: Check the packed artifact for internal references
+        env:
+          INTERNAL_NAMES: ${{ secrets.INTERNAL_NAMES }}
+        run: |
+          TARBALL=$(npm pack --silent)
+          ./scripts/check-public-hygiene.sh --tarball "$TARBALL"
+
       # Provenance is generated automatically under trusted publishing;
       # passing --provenance is redundant.
       - name: Publish to npm
@@ -205,9 +216,11 @@ jobs:
 
       # Folded in rather than given its own runner — it is one API call, and
       # re-triggering the gate is harmless.
-      - name: Trigger compat-suite gate
+      # hygiene-ok: this is the actual dispatch target, not a doc reference.
+      - name: Trigger the cross-language compatibility gate
         run: |
-          gh api repos/layr8/compat-suite/dispatches \
+          GATE_REPO=layr8/compat-suite  # hygiene-ok: dispatch target, not a doc reference
+          gh api "repos/$GATE_REPO/dispatches" \
             -f event_type=gate \
             -f "client_payload[sdk]=node" \
             -f "client_payload[version]=${{ needs.resolve.outputs.version }}"
