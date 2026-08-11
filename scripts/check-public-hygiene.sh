@@ -93,6 +93,10 @@ scan() {
 }
 
 scan "developer home directory"  '(^|[^[:alnum:]])(/Users/|/home/)[a-z][a-z0-9._-]+/'
+# The tilde form, which is how the original leak was written. Paths under a
+# dotted directory (`~/.npmrc`, `~/.config/…`) are ordinary user instructions
+# and are not matched.
+scan "home-relative path"        '~/[A-Za-z][A-Za-z0-9._-]*/'
 scan "private network address"   '(^|[^0-9.])(10\.[0-9]{1,3}|192\.168|172\.(1[6-9]|2[0-9]|3[01]))\.[0-9]{1,3}\.[0-9]{1,3}'
 scan "internal hostname"         '[a-z0-9-]+\.(internal\.[a-z0-9.-]+|svc\.cluster\.local)'
 scan "issue tracker identifier"  '(^|[^[:alnum:]])LAYR8-[0-9]{1,6}([^0-9]|$)'
