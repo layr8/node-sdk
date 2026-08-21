@@ -897,6 +897,55 @@ describe("an identity credential reaches the wire", () => {
     expect(() => identityAttachment("not-a-jws")).toThrow(/compact JWS/);
     expect(() => identityAttachment("a.b.")).toThrow(/compact JWS/);
   });
+
+  it("does not read an UNDECODABLE attachment as an identity credential", () => {
+    // Counting three segments is not reading a credential. Each of these has
+    // three of them and decodes to nothing usable, so nothing here can say
+    // whether it carries a `credentialSubject.scope`.
+    //
+    // "I could not read a scope" must not collapse into "there is no scope, so
+    // this is identity". Identity is the ONE attachment shape that leaves the
+    // wallet running, so that collapse hands a caller who attached garbage the
+    // wallet's grants, appended silently, while every other foreign attachment
+    // stands the wallet aside. The caller chose nothing and got a disclosure.
+    const undecodable = [
+      "..",
+      "a.b.c",
+      `${JWT_HEADER}.${Buffer.from("not json at all").toString("base64url")}.c2ln`,
+      // Valid JSON, but a scalar: it parses, and then has no `credentialSubject`
+      // to read — which looked exactly like a scope-free credential.
+      `${JWT_HEADER}.${Buffer.from("42").toString("base64url")}.c2ln`,
+    ];
+
+    for (const jws of undecodable) {
+      expect(isIdentityAttachment({ media_type: "application/vc+jwt", data: { jws } })).toBe(false);
+      expect(() => identityAttachment(jws)).toThrow(/compact JWS/);
+    }
+  });
+
+  it("stands the wallet aside when the caller mixes identity WITH a grant", async () => {
+    // The narrowing is "the caller's attachments are ALL identity credentials",
+    // not "at least one of them is". A caller that supplied a grant of its own
+    // has said which grant to use, and the wallet appending its own selection
+    // behind that would be overriding an explicit choice — the same silent
+    // substitution the whole path exists to avoid. Mixing the two is the case
+    // where both rules apply at once, and nothing pinned which one wins.
+    const c = await connected();
+
+    await sent(c, {
+      to: [RESOURCE],
+      type: MCP_CALL,
+      body: { params: { name: "read_email" } },
+      attachments: [
+        identityAttachment(IDENTITY_JWT),
+        { id: "mine", media_type: "application/vc+jwt", data: { jws: grantVariant(9) } },
+      ],
+    });
+
+    const attachments = node!.messages()[0].attachments as Array<Record<string, unknown>>;
+    // Both of the caller's survive, in order, and the wallet adds nothing.
+    expect(attachments.map((a) => a.id)).toEqual([IDENTITY_CLAIMS.id, "mine"]);
+  });
 });
 
 function cyclic(): Record<string, unknown> {

@@ -57,31 +57,61 @@ export const CREDENTIAL_MEDIA_TYPE = "application/vc+jwt";
  * depend on a module whose job is grant selection. Ten lines of JWT base64url
  * is the cheaper coupling to avoid.
  */
-function decodeJwtPayload(jwt: string): Record<string, unknown> {
+function decodeJwtPayload(jwt: string): Record<string, unknown> | null {
   const seg = jwt.split(".")[1];
-  if (!seg) return {};
+  if (!seg) return null;
   const pad = "=".repeat((4 - (seg.length % 4)) % 4);
   const json = Buffer.from(seg.replace(/-/g, "+").replace(/_/g, "/") + pad, "base64").toString(
     "utf8",
   );
+  let parsed: unknown;
   try {
-    return JSON.parse(json) as Record<string, unknown>;
+    parsed = JSON.parse(json);
   } catch {
-    return {};
+    return null;
   }
+  // A JSON scalar or array parses without throwing and has no
+  // `credentialSubject` to read — which is indistinguishable, downstream, from
+  // a credential that simply has no scope. It is not one. `null` here, so the
+  // caller can tell "no scope" from "nothing I could read".
+  if (!isRecord(parsed)) return null;
+  return parsed;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**
- * `credentialSubject.scope` of a compact JWS, as the node reads it.
+ * What a compact JWS is, by the same test the node routes on.
+ *
+ * THREE outcomes, not two. `credentialSubject.scope` present and non-empty is a
+ * grant; absent or empty is an identity credential; a payload that does not
+ * decode is **neither**.
+ *
+ * The third one is why this is not a boolean. A decoder that answers `[]` both
+ * for "this credential has no scope" and for "I could not read this at all"
+ * makes an undecodable attachment indistinguishable from an identity
+ * credential. That is not a cosmetic conflation: identity credentials are the
+ * one attachment shape that does NOT stand the wallet aside, so a caller who
+ * attached three dots and a shrug would get the wallet's grants appended to its
+ * message — a disclosure it never asked for, chosen silently, which is the
+ * exact thing the explicit-selection rule exists to forbid. Every other foreign
+ * attachment displaces the wallet; something unreadable has to behave like the
+ * rest of them, not like the privileged case.
  *
  * Claims are at the TOP LEVEL of the payload on this node; the `vc` wrapper is
  * the standard alternative and both are accepted — same as `parseCredential`.
  */
-function scopeOf(jws: string): unknown[] {
+type CredentialShape = "grant" | "identity" | "undecodable";
+
+function credentialShape(jws: string): CredentialShape {
   const payload = decodeJwtPayload(jws);
-  const vc = ((payload.vc ?? payload) ?? {}) as Record<string, unknown>;
-  const cs = (vc.credentialSubject ?? {}) as Record<string, unknown>;
-  return Array.isArray(cs.scope) ? (cs.scope as unknown[]) : [];
+  if (payload === null) return "undecodable";
+  const vc = isRecord(payload.vc) ? payload.vc : payload;
+  const cs = isRecord(vc.credentialSubject) ? vc.credentialSubject : {};
+  const scope = Array.isArray(cs.scope) ? (cs.scope as unknown[]) : [];
+  return scope.length > 0 ? "grant" : "identity";
 }
 
 /**
@@ -115,7 +145,18 @@ export function identityAttachment(credentialJws: string): Attachment {
     );
   }
 
-  if (scopeOf(credentialJws).length > 0) {
+  const shape = credentialShape(credentialJws);
+
+  if (shape === "undecodable") {
+    throw new Error(
+      "identityAttachment: expected a compact JWS whose payload segment is base64url-encoded " +
+        "JSON object. Three segments is not the same as three READABLE segments: a payload " +
+        "that does not decode says nothing about `credentialSubject.scope`, so nothing here " +
+        "can show it to be an identity credential rather than a grant.",
+    );
+  }
+
+  if (shape === "grant") {
     throw new Error(
       "identityAttachment: this credential has a non-empty `credentialSubject.scope`, " +
         "so it is a Verifiable Grant, not an identity credential. cloud-node would route it " +
@@ -124,8 +165,9 @@ export function identityAttachment(credentialJws: string): Attachment {
     );
   }
 
-  const payload = decodeJwtPayload(credentialJws);
-  const vc = ((payload.vc ?? payload) ?? {}) as Record<string, unknown>;
+  // Non-null: `shape` is "identity", so the payload decoded to an object.
+  const payload = decodeJwtPayload(credentialJws) as Record<string, unknown>;
+  const vc = isRecord(payload.vc) ? payload.vc : payload;
   const id = (vc.id ?? payload.jti) as string | undefined;
 
   return {
@@ -146,10 +188,14 @@ export function identityAttachment(credentialJws: string): Attachment {
  * Used by `withGrants` to decide whether caller-supplied attachments should
  * still displace the wallet. Nothing here trusts how the attachment was built:
  * a hand-assembled one counts exactly the same.
+ *
+ * False for an attachment whose `jws` does not decode, as well as for one that
+ * carries a scope. Only a credential this can actually READ as scope-free is an
+ * identity credential; see `credentialShape`.
  */
 export function isIdentityAttachment(att: Attachment | undefined): boolean {
   if (!att || att.media_type !== CREDENTIAL_MEDIA_TYPE) return false;
   const jws = att.data?.jws;
   if (typeof jws !== "string" || jws.split(".").length !== 3) return false;
-  return scopeOf(jws).length === 0;
+  return credentialShape(jws) === "identity";
 }
