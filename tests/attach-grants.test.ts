@@ -863,7 +863,7 @@ describe("an identity credential reaches the wire", () => {
   });
 
   it("refuses a credential that has a scope — that is a grant", () => {
-    // Not a taste call. cloud-node would route it to `input.credentials`, where
+    // Not a taste call. cloud-node would route it as a grant, where
     // it can never satisfy a `senderCredentials` requirement, and the denial
     // that follows is byte-for-byte the one for attaching nothing at all. The
     // check is local and exact, so the choice is between throwing at the call

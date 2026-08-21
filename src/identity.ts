@@ -5,8 +5,8 @@
  * An identity credential rides in the same `attachments` array, with the same
  * `media_type`, as a Verifiable Grant. cloud-node tells the two apart on one
  * test — `credentialSubject.scope`: present and non-empty is a grant and feeds
- * `input.credentials`; absent or empty is an identity credential and feeds
- * `input.sender_credentials`, where a grant's `constraints.senderCredentials`
+ * the grant input; absent or empty is an identity credential and feeds the
+ * sender-credentials input, where a grant's `constraints.senderCredentials`
  * can see it.
  *
  * ## Why this is a separate path, not a wallet feature
@@ -100,7 +100,7 @@ function scopeOf(jws: string): unknown[] {
  *   The node cannot verify anything else, so putting it on the wire only buys a
  *   denial that names the wrong problem.
  * - the credential carries a non-empty `credentialSubject.scope`. That is a
- *   GRANT. cloud-node would route it to `input.credentials`, it would not
+ *   GRANT. cloud-node would route it as a grant, it would not
  *   satisfy a `senderCredentials` requirement, and the resulting denial is
  *   indistinguishable from having attached nothing. The check is local, exact
  *   and free — refusing here is the difference between a stack trace at the
@@ -119,7 +119,7 @@ export function identityAttachment(credentialJws: string): Attachment {
     throw new Error(
       "identityAttachment: this credential has a non-empty `credentialSubject.scope`, " +
         "so it is a Verifiable Grant, not an identity credential. cloud-node would route it " +
-        "to `input.credentials` and it would never satisfy a `senderCredentials` requirement. " +
+        "as a grant and it would never satisfy a `senderCredentials` requirement. " +
         "Let the wallet attach grants, or pass it in `attachments` yourself.",
     );
   }
