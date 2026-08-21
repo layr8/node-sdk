@@ -27,6 +27,14 @@ export {
   ack,
   createMessage,
 } from "./message.js";
+// Identity credentials — "who the sender is", as opposed to the grants the
+// wallet attaches, which say what it may do. Selection is the CALLER's, always:
+// see the module doc for why an SDK must not choose these for you.
+export {
+  identityAttachment,
+  isIdentityAttachment,
+  CREDENTIAL_MEDIA_TYPE,
+} from "./identity.js";
 export type { HandlerFn, HandlerOptions } from "./handler.js";
 export { PASS } from "./handler.js";
 export {

@@ -407,7 +407,9 @@ client.refreshGrants(otherDid);  // a DID joined with joinDid()
 `attachGrants: false` (or `LAYR8_ATTACH_GRANTS=false`) stops the SDK reading or
 attaching anything; you then compose `attachments` yourself. Attachments you
 supply are never displaced — a message that already carries attachments is sent
-untouched.
+untouched. The single exception is
+[identity credentials](#identity-credentials), which are appended to rather
+than displacing the wallet's selection: they answer a different question.
 
 ### Not what you want: `signPresentation`
 
@@ -434,6 +436,59 @@ A hand-rolled attachment must look like:
   data: { jws: rawCredentialJwt },
 }
 ```
+
+## Identity credentials
+
+A **grant** says what the sender may do. An **identity credential** says *who
+the sender is* — that it works for a particular company, holds a licence, is
+over eighteen. The cloud-node keeps them apart on one test,
+`credentialSubject.scope`: with a scope it is a grant; without one it is an
+identity credential and lands in the policy input a grant's
+`senderCredentials` requirement reads.
+
+Both ride in the same `attachments` array with the same
+`media_type: "application/vc+jwt"`. `identityAttachment` builds the envelope:
+
+```typescript
+import { identityAttachment } from "@layr8/sdk";
+
+const creds = await client.listCredentials();
+const employment = creds.find((c) => c.id === chosenId)!;
+
+await client.send({
+  to: [peer],
+  type: "https://layr8.io/protocols/mcp/1.0/tools-call",
+  body: { params: { name: "place_order" } },
+  attachments: [identityAttachment(employment.credential_jwt)],
+});
+```
+
+Attaching one does **not** cost the message its grants — the wallet's selection
+is appended after yours.
+
+### You choose, always
+
+The SDK will not pick identity credentials for you, and this is deliberate.
+The requirement you are trying to satisfy lives in the grant held by the
+*recipient*; it never reaches you before the call. An SDK selecting
+automatically would therefore have no criterion to select by, and exactly one
+implementable behaviour: attach everything you hold. Which claims about you or
+your organisation a counterparty gets to see is your decision, made per
+message — not a library default.
+
+### Errors
+
+`identityAttachment` throws rather than putting something on the wire that the
+far end will misread:
+
+| Argument | Result |
+| --- | --- |
+| Not a compact JWS (three non-empty segments) | Throws. The node can verify nothing else. |
+| A credential with a non-empty `credentialSubject.scope` | Throws — that is a grant. Attached this way it would be routed as one, satisfy no `senderCredentials` requirement, and produce a denial identical to attaching nothing. Let the wallet handle grants. |
+
+An expired or revoked identity credential is **admitted** by the node today:
+validity is not checked on this input. Do not treat arrival as proof of
+currency.
 
 ## Handler Options
 
