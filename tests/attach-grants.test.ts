@@ -25,7 +25,12 @@ import { WebSocketServer, WebSocket as WS } from "ws";
 import { createServer, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 
-import { Layr8Client, type ErrorHandler } from "../src/index.js";
+import {
+  Layr8Client,
+  identityAttachment,
+  isIdentityAttachment,
+  type ErrorHandler,
+} from "../src/index.js";
 import type { Config, GrantMissInfo } from "../src/config.js";
 import { MAX_ATTACHED } from "../src/wallet.js";
 
@@ -770,6 +775,127 @@ describe("a failed write is still a failed write", () => {
 
     await sent(c, { to: [RESOURCE], type: MCP_CALL, body: { ok: true } });
     expect(node!.messages().at(-1)!.type).toBe(MCP_CALL);
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// Identity credentials — "who the sender is", beside the grants that say what
+// it may do. Boundary test for the sender -> cloud-node identity-credential
+// contract: the node routes an attachment on `credentialSubject.scope` alone,
+// so the two claims the SDK must keep straight are "no scope, so identity" and
+// "has a scope, so grant".
+// ---------------------------------------------------------------------------
+
+/**
+ * An identity credential in the stored shape: same top-level claims, same
+ * media type as a grant — and NO `credentialSubject.scope`. That absence is the
+ * entire discriminator, on this side and on the node's.
+ *
+ * Every identifier is fabricated, for the reason given at the top of this file.
+ */
+const IDENTITY_CLAIMS = {
+  "@context": ["https://www.w3.org/ns/credentials/v2"],
+  id: "urn:uuid:idc-test-0000-0000-000000000042",
+  jti: "urn:uuid:idc-test-0000-0000-000000000042",
+  type: ["VerifiableCredential", "EmploymentCredential"],
+  iss: "did:web:example.com:users:testissuer",
+  issuer: "did:web:example.com:users:testissuer",
+  sub: AGENT,
+  validFrom: "2026-07-30T14:29:37.104494Z",
+  credentialSubject: {
+    id: AGENT,
+    employer: "Example Incorporated",
+    role: "buyer",
+  },
+};
+
+const IDENTITY_JWT = [
+  JWT_HEADER,
+  Buffer.from(JSON.stringify(IDENTITY_CLAIMS)).toString("base64url"),
+  "aWRlbnRpdHktc2ln",
+].join(".");
+
+describe("an identity credential reaches the wire", () => {
+  it("goes out exactly as the caller built it", async () => {
+    const c = await connected();
+
+    await sent(c, {
+      to: [RESOURCE],
+      type: MCP_CALL,
+      body: { params: { name: "read_email" } },
+      attachments: [identityAttachment(IDENTITY_JWT)],
+    });
+
+    const attachments = node!.messages()[0].attachments as Array<Record<string, unknown>>;
+    expect(attachments[0]).toEqual({
+      id: IDENTITY_CLAIMS.id,
+      media_type: "application/vc+jwt",
+      data: { jws: IDENTITY_JWT },
+    });
+  });
+
+  it("does not cost the message its grant", async () => {
+    // The half that would be silently wrong. Under the old rule ANY
+    // caller-supplied attachment made the wallet stand aside, so saying who you
+    // are meant sending nothing that says what you may do — and the node's
+    // denial then read "no grant covers this call", which is precisely the
+    // message that sends people looking at their grant configuration.
+    const c = await connected();
+
+    await sent(c, {
+      to: [RESOURCE],
+      type: MCP_CALL,
+      body: { params: { name: "read_email" } },
+      attachments: [identityAttachment(IDENTITY_JWT)],
+    });
+
+    const attachments = node!.messages()[0].attachments as Array<Record<string, unknown>>;
+    // The caller's stays FIRST and unmodified; the wallet's selection follows.
+    expect(attachments.map((a) => a.id)).toEqual([
+      IDENTITY_CLAIMS.id,
+      "urn:uuid:vg-mcp-test-0000-0000-000000000001",
+    ]);
+    expect(attachments[1]).toMatchObject({
+      media_type: "application/vc+jwt",
+      data: { jws: REAL_GRANT_JWT },
+    });
+  });
+
+  it("refuses a credential that has a scope — that is a grant", () => {
+    // Not a taste call. cloud-node would route it to `input.credentials`, where
+    // it can never satisfy a `senderCredentials` requirement, and the denial
+    // that follows is byte-for-byte the one for attaching nothing at all. The
+    // check is local and exact, so the choice is between throwing at the call
+    // site and a misroute diagnosed at the far end.
+    expect(() => identityAttachment(REAL_GRANT_JWT)).toThrow(/Verifiable Grant/);
+    expect(isIdentityAttachment({ media_type: "application/vc+jwt", data: { jws: REAL_GRANT_JWT } }))
+      .toBe(false);
+    expect(isIdentityAttachment({ media_type: "application/vc+jwt", data: { jws: IDENTITY_JWT } }))
+      .toBe(true);
+  });
+
+  it("leaves a caller-attached GRANT displacing the wallet, as before", async () => {
+    // The other side of the narrowing: only identity credentials keep the
+    // wallet running. A caller attaching a grant is still saying "use mine".
+    const c = await connected();
+
+    await sent(c, {
+      to: [RESOURCE],
+      type: MCP_CALL,
+      body: { params: { name: "read_email" } },
+      attachments: [{ id: "mine", media_type: "application/vc+jwt", data: { jws: grantVariant(9) } }],
+    });
+
+    const attachments = node!.messages()[0].attachments as Array<Record<string, unknown>>;
+    expect(attachments.map((a) => a.id)).toEqual(["mine"]);
+  });
+
+  it("refuses anything that is not a compact JWS", () => {
+    // The node can verify nothing else, so attaching it only buys a denial that
+    // names the wrong problem.
+    expect(() => identityAttachment("not-a-jws")).toThrow(/compact JWS/);
+    expect(() => identityAttachment("a.b.")).toThrow(/compact JWS/);
   });
 });
 
