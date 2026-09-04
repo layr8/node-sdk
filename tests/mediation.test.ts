@@ -91,7 +91,10 @@ describe("client wiring", () => {
     // Bootstrap runs in the background after connect and will fail against
     // this mock (no mediator answers); the error handler absorbs it.
     await client.connect();
+    // Both mediation reply legs are bound at join, so the coordinate-mediation
+    // grant is delivered even when the node does not negotiate reply_protocol/1.
     expect(joinPayload.payload_types).toContain("https://didcomm.org/messagepickup/3.0");
+    expect(joinPayload.payload_types).toContain("https://didcomm.org/coordinate-mediation/3.0");
     await client.close();
     await new Promise<void>((r) => wss.close(() => r()));
   });
