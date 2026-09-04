@@ -4,6 +4,26 @@ All notable changes to `@layr8/sdk`. Format loosely follows [Keep a Changelog](h
 
 This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git history.
 
+## [Unreleased]
+
+### Added
+
+- **Mediation — store-and-forward through a Space mediator.** An agent that
+  is not always connected gives the client a mediator DID (`mediator` /
+  `LAYR8_MEDIATOR_DID`) and, on every connect and reconnect, the client
+  enrols (`mediate-request`, `recipient-update`), declares the mediator on
+  its own node (`PUT /api/v1/dids/:did/mediator`, cloud-node ADR 0005),
+  collects everything queued (`delivery-request` → re-injection through the
+  node's `/didcomm` → `messages-received`) and turns live delivery on,
+  handling the mediator's `delivery` pushes the same way. The SDK never
+  decrypts: the mediator holds the original ciphertext and the node verifies
+  it on re-injection as a first arrival, so collected messages reach your
+  handlers with their original `from`. Each step is exported under the
+  `mediation` namespace and returns `{ ok, ... }` rather than throwing.
+  New config `mediatorLive`, `didcommUrl` (`LAYR8_MEDIATOR_LIVE`,
+  `LAYR8_DIDCOMM_URL`); `client.mediator`, `client.didcommUrl`;
+  `ErrorKind.Mediation`; `postDidcomm()`; `RestClient.put/delete`.
+
 ## [0.2.5] - 2026-08-21
 
 ### Added

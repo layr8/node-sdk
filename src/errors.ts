@@ -104,6 +104,8 @@ export enum ErrorKind {
   ServerReject,
   /** Failed to write to the WebSocket connection. */
   TransportWrite,
+  /** A background mediation step (enrol / declare / collect / live) failed. */
+  Mediation,
 }
 
 /**

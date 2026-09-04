@@ -84,6 +84,16 @@ export interface Config {
   /** DID specification for the cloud-node join handshake. Merged with defaults. */
   didSpec?: DidSpec;
   /**
+   * A mediator DID (see `mediation.ts`): on every (re)connect the client
+   * enrols, declares it on the node, collects what was queued while offline
+   * and turns live delivery on. Fallback: LAYR8_MEDIATOR_DID env.
+   */
+  mediator?: string;
+  /** `false` collects but leaves live delivery off. Fallback: LAYR8_MEDIATOR_LIVE env (default true). */
+  mediatorLive?: boolean;
+  /** Where collected ciphertext is re-injected. Fallback: LAYR8_DIDCOMM_URL env; default `<rest url>/didcomm`. */
+  didcommUrl?: string;
+  /**
    * Attach the Verifiable Grants covering each outbound message. Default `true`.
    * Fallback: LAYR8_ATTACH_GRANTS env (`"false"`/`"0"` turns it off).
    *
@@ -152,6 +162,9 @@ export interface ResolvedConfig {
   apiKey: string;
   agentDid: string;
   didSpec: Required<DidSpec>;
+  mediator: string | null;
+  mediatorLive: boolean;
+  didcommUrl: string | null;
   attachGrants: boolean;
   grantCacheMs: number;
   grantReadTimeoutMs: number;
@@ -254,6 +267,9 @@ export function resolveConfig(cfg: Config): ResolvedConfig {
     apiKey,
     agentDid,
     didSpec,
+    mediator: blankToNull(cfg.mediator ?? process.env.LAYR8_MEDIATOR_DID),
+    mediatorLive: cfg.mediatorLive ?? envBool(process.env.LAYR8_MEDIATOR_LIVE) ?? true,
+    didcommUrl: blankToNull(cfg.didcommUrl ?? process.env.LAYR8_DIDCOMM_URL),
     attachGrants: cfg.attachGrants ?? envBool(process.env.LAYR8_ATTACH_GRANTS) ?? true,
     grantCacheMs: envMs(cfg.grantCacheMs, process.env.LAYR8_GRANT_CACHE_MS, DEFAULT_GRANT_CACHE_MS),
     // Zero is not accepted here, unlike the cache TTL where it means "never
@@ -312,4 +328,9 @@ function envMs(
   }
   const n = Number(raw);
   return raw !== undefined && raw.trim() !== "" && Number.isFinite(n) && n >= min ? n : fallback;
+}
+
+function blankToNull(v: string | undefined): string | null {
+  const t = (v ?? "").trim();
+  return t === "" ? null : t;
 }

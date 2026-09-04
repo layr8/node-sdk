@@ -41,6 +41,7 @@ import { Channel, type ServerReply } from "./channel.js";
 import { RestClient, restUrlFromWebSocket } from "./rest.js";
 import { McpBinding, DEFAULT_MCP_BASE } from "./mcp.js";
 import { Wallet } from "./wallet.js";
+import { DELIVERY_TYPE, deliveryHandler, bootstrap as mediationBootstrap } from "./mediation.js";
 
 function toError(err: unknown): Error {
   return err instanceof Error ? err : new Error(String(err));
@@ -219,6 +220,52 @@ export class Layr8Client extends EventEmitter {
       ? new Wallet(this.rest, this.cfg.grantCacheMs, undefined, this.cfg.grantReadTimeoutMs)
       : null;
     this.onGrantMiss = cfg.onGrantMiss;
+    // A mediated client handles the mediator's live `delivery` pushes itself
+    // (re-inject + ack). Registered here, before connect(), so the protocol
+    // subscription goes out with the join.
+    if (this.cfg.mediator) {
+      this.registry.register(DELIVERY_TYPE, deliveryHandler(this));
+    }
+  }
+
+  /** The configured mediator DID, or null (see `mediation.ts`). */
+  get mediator(): string | null {
+    return this.cfg.mediator;
+  }
+
+  /** Where collected ciphertext is re-injected: `didcommUrl` config, else `<rest url>/didcomm`. */
+  get didcommUrl(): string {
+    return this.cfg.didcommUrl ?? `${restUrlFromWebSocket(this.cfg.nodeUrl)}/didcomm`;
+  }
+
+  /** @internal The node REST client, for `mediation.ts`. */
+  get _rest(): RestClient {
+    return this.rest;
+  }
+
+  /**
+   * Off the connect path: every step is a request through this very client,
+   * and a slow mediator must not stall connect() or reconnection. Failures
+   * reach the ErrorHandler as ErrorKind.Mediation.
+   */
+  private startMediation(): void {
+    const mediator = this.cfg.mediator;
+    if (!mediator) return;
+    void mediationBootstrap(this, mediator, { live: this.cfg.mediatorLive })
+      .then((r) => {
+        if (!r.ok) {
+          const cause = r.error instanceof Error ? r.error : new Error(`${r.step}: ${String(r.error)}`);
+          this.onError(new SDKError(ErrorKind.Mediation, { type: r.step, from: mediator, cause }));
+        }
+      })
+      .catch((err: unknown) => {
+        this.onError(
+          new SDKError(ErrorKind.Mediation, {
+            from: mediator,
+            cause: err instanceof Error ? err : new Error(String(err)),
+          }),
+        );
+      });
   }
 
   /**
@@ -348,7 +395,10 @@ export class Layr8Client extends EventEmitter {
 
     this.connection = new Connection(this.cfg.nodeUrl, this.cfg.apiKey, {
       onDisconnect: (err) => this.emit("disconnect", err),
-      onReconnect: () => this.emit("reconnect"),
+      onReconnect: () => {
+        this.emit("reconnect");
+        this.startMediation();
+      },
     });
 
     try {
@@ -385,6 +435,7 @@ export class Layr8Client extends EventEmitter {
 
     this.primaryChannel = channel;
     this.connected = true;
+    this.startMediation();
   }
 
   /**
