@@ -41,7 +41,7 @@ import { Channel, type ServerReply } from "./channel.js";
 import { RestClient, restUrlFromWebSocket } from "./rest.js";
 import { McpBinding, DEFAULT_MCP_BASE } from "./mcp.js";
 import { Wallet } from "./wallet.js";
-import { DELIVERY_TYPE, deliveryHandler, bootstrap as mediationBootstrap } from "./mediation.js";
+import { DELIVERY_TYPE, MEDIATION_PROTOCOLS, deliveryHandler, bootstrap as mediationBootstrap } from "./mediation.js";
 
 function toError(err: unknown): Error {
   return err instanceof Error ? err : new Error(String(err));
@@ -391,6 +391,19 @@ export class Layr8Client extends EventEmitter {
     const PROBLEM_REPORT_PROTOCOL = "https://didcomm.org/report-problem/2.0";
     if (!protocols.includes("*") && !protocols.includes(PROBLEM_REPORT_PROTOCOL)) {
       protocols.push(PROBLEM_REPORT_PROTOCOL);
+    }
+
+    // A mediated client must bind BOTH mediation protocols at join, not just
+    // messagepickup/3.0 (which the delivery handler brings): the node routes a
+    // typed reply only to a session subscribed to its protocol, so without
+    // coordinate-mediation/3.0 here the mediate-grant / recipient replies are
+    // dropped whenever the node does not negotiate reply_protocol/1, and
+    // enrolment times out. Correlated replies still resolve their pending
+    // request before any handler runs, so no handler is needed for these.
+    if (this.cfg.mediator) {
+      for (const p of MEDIATION_PROTOCOLS) {
+        if (!protocols.includes(p)) protocols.push(p);
+      }
     }
 
     this.connection = new Connection(this.cfg.nodeUrl, this.cfg.apiKey, {
