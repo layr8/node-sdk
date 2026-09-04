@@ -6,6 +6,21 @@ export type {
   JoinDidHandler,
 } from "./client.js";
 
+// Mediation (store-and-forward through a Space mediator)
+export * as mediation from "./mediation.js";
+export { DELIVERY_TYPE as MEDIATION_DELIVERY_TYPE, MEDIATION_PROTOCOLS } from "./mediation.js";
+export type {
+  MediationOptions,
+  EnrollOptions,
+  PickupOptions,
+  BootstrapOptions,
+  EnrollResult,
+  PickupResult,
+  StatusResult,
+  SimpleResult,
+  MediationFailure,
+} from "./mediation.js";
+
 // MCP (Model Context Protocol) over DIDComm
 export { McpBinding, McpPeer, McpError, DEFAULT_MCP_BASE } from "./mcp.js";
 export type { McpCallOptions } from "./mcp.js";
@@ -53,7 +68,7 @@ export type { ErrorHandler } from "./errors.js";
 export type { ServerReply } from "./channel.js";
 
 // REST client
-export { RESTError } from "./rest.js";
+export { RESTError, postDidcomm } from "./rest.js";
 // The per-call deadline every credential/presentation option type carries. The
 // name says REST on purpose: `RequestOptions` above is the DIDComm one, and a
 // caller reaching for a timeout should not have to guess which of two

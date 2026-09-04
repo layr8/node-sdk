@@ -120,6 +120,28 @@ export class RestClient {
     return this.request<T>("POST", path, headers, data, opts);
   }
 
+  /** Send a JSON PUT request and return the decoded response. */
+  async put<T>(path: string, body: unknown, opts?: RestRequestOptions): Promise<T> {
+    const data = JSON.stringify(body);
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "Content-Length": String(Buffer.byteLength(data)),
+    };
+    if (this.apiKey) {
+      headers["x-api-key"] = this.apiKey;
+    }
+    return this.request<T>("PUT", path, headers, data, opts);
+  }
+
+  /** Send a DELETE request; resolves with the decoded body, or undefined for an empty one. */
+  async delete<T = void>(path: string, opts?: RestRequestOptions): Promise<T> {
+    const headers: Record<string, string> = {};
+    if (this.apiKey) {
+      headers["x-api-key"] = this.apiKey;
+    }
+    return this.request<T>("DELETE", path, headers, undefined, opts);
+  }
+
   /** Send a GET request and return the decoded response. */
   async get<T>(path: string, opts?: RestRequestOptions): Promise<T> {
     const headers: Record<string, string> = {};
@@ -227,6 +249,53 @@ export class RestClient {
       req.end();
     });
   }
+}
+
+/**
+ * Post a packed DIDComm message (the JWE bytes) to a node's public `/didcomm`
+ * ingress — the re-injection step of mediation. No API key: the ingress
+ * authenticates the message itself. Resolves on 2xx, rejects with RESTError.
+ */
+export function postDidcomm(url: string, jwe: Buffer | string, timeoutMs = 30_000): Promise<void> {
+  const parsed = new URL(url);
+  const isHttps = parsed.protocol === "https:";
+  const mod = isHttps ? https : http;
+  const body = typeof jwe === "string" ? Buffer.from(jwe) : jwe;
+  const headers: Record<string, string> = {
+    "Content-Type": "application/didcomm-encrypted+json",
+    "Content-Length": String(body.byteLength),
+  };
+  let hostname = parsed.hostname;
+  if (isLocalhost(hostname)) {
+    headers["Host"] = parsed.host;
+    hostname = "127.0.0.1";
+  }
+
+  return new Promise<void>((resolve, reject) => {
+    const req = mod.request(
+      {
+        hostname,
+        port: parsed.port || (isHttps ? 443 : 80),
+        path: parsed.pathname + parsed.search,
+        method: "POST",
+        headers,
+        timeout: timeoutMs,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk: Buffer) => chunks.push(chunk));
+        res.on("end", () => {
+          const status = res.statusCode ?? 0;
+          if (status >= 200 && status < 300) resolve();
+          else reject(parseRESTError(status, Buffer.concat(chunks).toString("utf-8")));
+        });
+      },
+    );
+    req.on("timeout", () => req.destroy(new Error(`timeout after ${timeoutMs}ms`)));
+    req.on("error", reject);
+    req.write(body);
+    req.end();
+  });
 }
 
 /** Parse an error response body into a RESTError. */

@@ -276,6 +276,9 @@ Configuration can be set explicitly or via environment variables. Environment va
 | `agentDid` | `LAYR8_AGENT_DID` | Yes | Agent DID identity |
 | `attachGrants` | `LAYR8_ATTACH_GRANTS` | No | Attach covering Verifiable Grants to outbound messages (default `true`) — see [Verifiable Grants](#verifiable-grants) |
 | `grantCacheMs` | `LAYR8_GRANT_CACHE_MS` | No | How long held grants are cached before re-reading (default `60000`) |
+| `mediator` | `LAYR8_MEDIATOR_DID` | No | Mediator to enrol with and collect from on every (re)connect — see [Mediation](#mediation-offline-delivery) |
+| `mediatorLive` | `LAYR8_MEDIATOR_LIVE` | No | `false` leaves live delivery off after collection |
+| `didcommUrl` | `LAYR8_DIDCOMM_URL` | No | Where collected ciphertext is re-injected (default `<rest url>/didcomm`) |
 | `grantReadTimeoutMs` | `LAYR8_GRANT_READ_TIMEOUT_MS` | No | Deadline on the grant read that precedes a send (default `2000`) — see [If the node stops answering](#if-the-node-stops-answering) |
 | `restTimeoutMs` | `LAYR8_REST_TIMEOUT_MS` | No | Deadline on every credential/presentation REST call (default `30000`, `0` disables) — see [Deadlines on the credential APIs](#deadlines-on-the-credential-apis) |
 | `onGrantMiss` | — | No | Called when the node denies a message you sent with no grant attached |
@@ -489,6 +492,38 @@ far end will misread:
 An expired or revoked identity credential is **admitted** by the node today:
 validity is not checked on this input. Do not treat arrival as proof of
 currency.
+
+## Mediation (offline delivery)
+
+The cloud-node does not queue for an agent that is offline; a `layr8/mediator`
+in the Space does. Give the client the mediator's DID and it enrols, declares
+the mediator on its node, collects whatever was queued while it was away, and
+keeps live delivery on — on every connect and reconnect, in the background:
+
+```typescript
+const client = new Layr8Client(logErrors(), {
+  nodeUrl: "wss://node.example.com/plugin_socket/websocket",
+  apiKey: process.env.LAYR8_API_KEY,
+  agentDid: "did:web:node.example.com:agents:me",
+  mediator: "did:web:node.example.com:mediator", // or LAYR8_MEDIATOR_DID
+});
+```
+
+Collected messages arrive through your ordinary handlers: the mediator holds
+the original ciphertext, and the client posts each one back to its own node's
+`/didcomm`, so it is unpacked, sender-bound and authorized exactly like a
+first arrival. Nothing in the SDK decrypts. A background step that fails
+reaches your `ErrorHandler` as `ErrorKind.Mediation`.
+
+Every step is also available by hand under the `mediation` namespace —
+`enroll`, `declare`, `undeclare`, `pickup`, `live`, `status` — and none of
+them throws for a remote refusal; they return `{ ok: false, error }`.
+`mediatorLive: false` collects but leaves live delivery off; `didcommUrl`
+overrides where ciphertext is re-injected.
+
+The agent needs protocol grants on the mediator for
+`coordinate-mediation/3.0` and `messagepickup/3.0`, which the wallet attaches
+like any other. Forwards to the mediator need none.
 
 ## Handler Options
 
