@@ -26,6 +26,26 @@ export interface DidSpec {
   verificationMethods?: VerificationMethod[];
   /** Optional controller DID for the created DID document. Defaults to the node DID. */
   controller?: string;
+  /**
+   * The DID whose authority this DID borrows. Optional; omitting
+   * it is the behaviour that existed before this field.
+   *
+   * The node REFUSES a join whose parent is not a persistent identity it
+   * hosts, with `plugin.parent.not-persistent`, `plugin.parent.not-found` or
+   * `plugin.parent.not-hosted-here`. An ephemeral DID is deleted once its
+   * holder has been disconnected for the node's TTL, so a parent that can be
+   * swept away would leave a child that nobody can withdraw and nobody can
+   * keep.
+   *
+   * Naming a parent does not yet cause anything to be signed or minted.
+   */
+  parentDid?: string;
+  /**
+   * The role the parent's authority is borrowed through.
+   * Optional, and only meaningful alongside `parentDid` — the node refuses a
+   * `parentRole` with no `parentDid` rather than ignoring it.
+   */
+  parentRole?: string;
 }
 
 /** Default DID specification matching the original hardcoded behavior. */
@@ -35,6 +55,8 @@ export const DEFAULT_DID_SPEC: Required<DidSpec> = {
   label: "",
   type: "plugin",
   controller: "",
+  parentDid: "",
+  parentRole: "",
   verificationMethods: [
     { purpose: "authentication" },
     { purpose: "assertionMethod" },

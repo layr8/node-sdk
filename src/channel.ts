@@ -265,6 +265,17 @@ export class Channel {
     if (spec.controller) {
       didSpecPayload.controller = spec.controller;
     }
+    // Same shape as `controller`: sent only when set, so a join that names no
+    // parent puts exactly the payload on the wire it put there before these
+    // fields existed. `parentRole` is sent independently of `parentDid` — the
+    // node refuses the pair rather than the SDK silently dropping a role the
+    // caller asked for.
+    if (spec.parentDid) {
+      didSpecPayload.parentDid = spec.parentDid;
+    }
+    if (spec.parentRole) {
+      didSpecPayload.parentRole = spec.parentRole;
+    }
 
     const joinPayload = {
       payload_types: this.protocols,
