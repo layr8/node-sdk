@@ -92,6 +92,8 @@ describe("resolveConfig", () => {
       label: "my-agent",
       type: "plugin",
       controller: "",
+      parentDid: "",
+      parentRole: "",
       verificationMethods: [
         { purpose: "authentication" },
       ],

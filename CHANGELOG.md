@@ -6,6 +6,18 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
 
 ## [Unreleased]
 
+### Added
+
+- **A join can name the parent whose authority its DID borrows.**
+  `DidSpec.parentDid` and `DidSpec.parentRole` are optional and are sent only
+  when set, so a join that names no parent puts exactly the payload on the
+  wire it did before. The cloud-node refuses a parent that is not a
+  persistent identity it hosts, and the three refusals are distinguishable on
+  the wire: `plugin.parent.not-persistent`, `plugin.parent.not-found`,
+  `plugin.parent.not-hosted-here`. A `parentRole` with no `parentDid` is sent
+  and refused rather than dropped. Naming a parent does not yet cause
+  anything to be signed or minted.
+
 ## [0.2.7] - 2026-09-04
 
 ### Fixed

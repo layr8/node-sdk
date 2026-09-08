@@ -162,6 +162,85 @@ describe("PhoenixChannel didSpec", () => {
   });
 });
 
+describe("PhoenixChannel parent authority", () => {
+  let server: MockPhoenixServer;
+
+  afterEach(async () => {
+    if (server) await server.close();
+  });
+
+  async function joinPayloadFor(didSpec?: DidSpec): Promise<Record<string, unknown>> {
+    server = new MockPhoenixServer();
+    const wsUrl = await server.ready();
+
+    const received = new Promise<unknown>((resolve) => {
+      server.onMsg = (msg) => {
+        if (msg.event === "phx_join") {
+          resolve(msg.payload);
+          server.sendToClient(msg.ref, msg.ref, msg.topic, "phx_reply", {
+            status: "ok",
+            response: { did: "did:web:node:test" },
+          });
+        }
+      };
+    });
+
+    const ch = new PhoenixChannel(
+      wsUrl,
+      "test-api-key",
+      "did:web:test",
+      { onMessage: () => {} },
+      didSpec,
+    );
+
+    await ch.connect(["https://layr8.io/protocols/echo/1.0"]);
+    const payload = (await received) as { did_spec: Record<string, unknown> };
+    ch.close();
+    return payload.did_spec;
+  }
+
+  it("carries parentDid and parentRole to the node when both are set", async () => {
+    const didSpec = await joinPayloadFor({
+      mode: "Create",
+      storage: "ephemeral",
+      parentDid: "did:web:acme.example:users:alice",
+      parentRole: "did:web:acme.example:roles:operator",
+    });
+
+    expect(didSpec.parentDid).toBe("did:web:acme.example:users:alice");
+    expect(didSpec.parentRole).toBe("did:web:acme.example:roles:operator");
+  });
+
+  it("carries parentDid alone", async () => {
+    const didSpec = await joinPayloadFor({
+      parentDid: "did:web:acme.example:users:alice",
+    });
+
+    expect(didSpec.parentDid).toBe("did:web:acme.example:users:alice");
+    expect("parentRole" in didSpec).toBe(false);
+  });
+
+  it("omits both keys entirely when no parent is named", async () => {
+    // Absent and empty are not the same value to the node: an absent key is
+    // "the caller named no parent". Sending "" would be a value nobody chose.
+    const didSpec = await joinPayloadFor();
+
+    expect("parentDid" in didSpec).toBe(false);
+    expect("parentRole" in didSpec).toBe(false);
+  });
+
+  it("still sends a parentRole with no parentDid, for the node to refuse", async () => {
+    // Dropping it here would turn a refusal the caller can read into a silent
+    // success that borrowed nothing.
+    const didSpec = await joinPayloadFor({
+      parentRole: "did:web:acme.example:roles:operator",
+    });
+
+    expect(didSpec.parentRole).toBe("did:web:acme.example:roles:operator");
+    expect("parentDid" in didSpec).toBe(false);
+  });
+});
+
 describe("PhoenixChannel capability negotiation", () => {
   let server: MockPhoenixServer;
 
