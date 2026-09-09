@@ -217,7 +217,7 @@ describe("PhoenixChannel parent authority", () => {
     expect("parentDid" in didSpec).toBe(false);
   });
 
-  it("never sends parentRole, whatever the caller sets (LAYR8-1129)", async () => {
+  it("never sends parentRole, whatever the caller sets", async () => {
     // The field is gone from `DidSpec`, so this is what an old caller's object
     // looks like arriving through a loosely typed config. Sending it would get
     // the join REFUSED by the node — correct behaviour on the node's part, and
@@ -232,7 +232,7 @@ describe("PhoenixChannel parent authority", () => {
   });
 });
 
-describe("PhoenixChannel delegated credentials (LAYR8-1129)", () => {
+describe("PhoenixChannel delegated credentials", () => {
   let server: MockPhoenixServer;
 
   afterEach(async () => {

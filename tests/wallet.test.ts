@@ -483,7 +483,7 @@ describe("toolNameOf", () => {
 // against a fake node and reads the attachment off the wire, which is the claim
 // that was actually wanted. A grep and a behaviour are not the same evidence.
 
-describe("Wallet — credentials delivered in a join reply (LAYR8-1129)", () => {
+describe("Wallet — credentials delivered in a join reply", () => {
   /**
    * An ephemeral DID's delegated credentials exist NOWHERE but the join reply.
    * Nothing on the node stores them, so `GET /api/v1/credentials` returns
