@@ -1,6 +1,12 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { WebSocketServer, WebSocket as WS } from "ws";
-import { PhoenixChannel } from "../src/channel.js";
+import {
+  Channel,
+  PhoenixChannel,
+  parseDelegatedCredentials,
+  type DelegatedCredentialsReading,
+} from "../src/channel.js";
+import { Connection } from "../src/connection.js";
 import { NotConnectedError } from "../src/errors.js";
 import type { DidSpec } from "../src/config.js";
 import { delay, ephemeralServer, readyUrl } from "./helpers/mock-ws-server.js";
@@ -262,22 +268,28 @@ describe("PhoenixChannel delegated credentials", () => {
   it("carries what the node signed", async () => {
     const ch = await joinWithReply({
       capabilities: ["ephemeral_delegation/1"],
-      delegated_credentials: [
+      delegated_credentials: {
+        status: "complete",
+        credentials: [
+          { id: "urn:uuid:child", parent_capability: "urn:uuid:parent", credential_jwt: "a.b.c" },
+        ],
+      },
+    });
+
+    expect(ch.delegatedCredentials()).toEqual({
+      status: "complete",
+      credentials: [
         { id: "urn:uuid:child", parent_capability: "urn:uuid:parent", credential_jwt: "a.b.c" },
       ],
     });
-
-    expect(ch.delegatedCredentials()).toEqual([
-      { id: "urn:uuid:child", parent_capability: "urn:uuid:parent", credential_jwt: "a.b.c" },
-    ]);
     expect(ch.supportsEphemeralDelegation()).toBe(true);
     ch.close();
   });
 
-  it("keeps 'nobody asked', 'read and empty' and 'never looked' apart", async () => {
-    // Three facts, three values. `?? []` anywhere on this path turns the first
-    // or the third into the second, and the second is the only one of them
-    // that is a MEASUREMENT of the parent's wallet.
+  it("keeps all five readings apart", async () => {
+    // Five facts, five values. Any coalescing on this path turns one of the
+    // other four into "the parent's wallet was read and it grants nothing",
+    // and that is the only one of the five that is a MEASUREMENT.
     const noParent = await joinWithReply({ capabilities: ["ephemeral_delegation/1"] });
     expect(noParent.delegatedCredentials()).toBeUndefined();
     expect(noParent.supportsEphemeralDelegation()).toBe(true);
@@ -285,10 +297,33 @@ describe("PhoenixChannel delegated credentials", () => {
 
     const emptyWallet = await joinWithReply({
       capabilities: ["ephemeral_delegation/1"],
-      delegated_credentials: [],
+      delegated_credentials: { status: "complete", credentials: [] },
     });
-    expect(emptyWallet.delegatedCredentials()).toEqual([]);
+    expect(emptyWallet.delegatedCredentials()).toEqual({ status: "complete", credentials: [] });
     emptyWallet.close();
+
+    const cred = {
+      id: "urn:uuid:child",
+      parent_capability: "urn:uuid:parent",
+      credential_jwt: "a.b.c",
+    };
+
+    const partial = await joinWithReply({
+      capabilities: ["ephemeral_delegation/1"],
+      delegated_credentials: { status: "partial", credentials: [cred] },
+    });
+    expect(partial.delegatedCredentials()).toEqual({ status: "partial", credentials: [cred] });
+    partial.close();
+
+    // The reading this whole shape exists for. It arrives with an EMPTY
+    // credential list, exactly like "read and empty" — and must not be
+    // reported as it. `status` is the entire difference.
+    const unread = await joinWithReply({
+      capabilities: ["ephemeral_delegation/1"],
+      delegated_credentials: { status: "unread", credentials: [] },
+    });
+    expect(unread.delegatedCredentials()).toEqual({ status: "unread", credentials: [] });
+    unread.close();
 
     const oldNode = await joinWithReply({ capabilities: [] });
     expect(oldNode.delegatedCredentials()).toBeUndefined();
@@ -296,12 +331,52 @@ describe("PhoenixChannel delegated credentials", () => {
     oldNode.close();
   });
 
-  it("treats a non-array delegated_credentials as no reading at all", async () => {
-    // A node that sent `null` or an object read nothing we can use, and
-    // reading it as `[]` would report the parent's wallet as measured-empty.
+  it("the readings are PAIRWISE distinct, not merely three-of-five distinct", () => {
+    // Asserting a subset of the pairs is how a suite stays green over exactly
+    // this defect: before `status`, "unread" and "read and empty" were the
+    // same value and every other pair still differed.
+    const cred = {
+      id: "urn:uuid:child",
+      parent_capability: "urn:uuid:parent",
+      credential_jwt: "a.b.c",
+    };
+
+    const readings = [
+      parseDelegatedCredentials(undefined),
+      parseDelegatedCredentials({ status: "complete", credentials: [] }),
+      parseDelegatedCredentials({ status: "complete", credentials: [cred] }),
+      parseDelegatedCredentials({ status: "partial", credentials: [cred] }),
+      parseDelegatedCredentials({ status: "unread", credentials: [] }),
+    ];
+
+    for (let i = 0; i < readings.length; i++) {
+      for (let j = i + 1; j < readings.length; j++) {
+        expect(readings[i], `readings ${i} and ${j} collapsed`).not.toEqual(readings[j]);
+      }
+    }
+  });
+
+  it("treats anything that is not a well-formed reading as no reading at all", async () => {
+    // A node that sent `null`, a bare array (the shape before `status`), or an
+    // object with a status this build does not know, read nothing we can use.
+    // Reading any of them as `{status: "complete", credentials: []}` would
+    // report the parent's wallet as measured-empty when nobody measured it.
+    for (const raw of [
+      null,
+      [],
+      [{ id: "a", parent_capability: "b", credential_jwt: "c" }],
+      { credentials: [] },
+      { status: "ok", credentials: [] },
+      { status: "complete" },
+      "complete",
+    ]) {
+      expect(parseDelegatedCredentials(raw), `${JSON.stringify(raw)} is not a reading`)
+        .toBeUndefined();
+    }
+
     const ch = await joinWithReply({
       capabilities: ["ephemeral_delegation/1"],
-      delegated_credentials: null as unknown as [],
+      delegated_credentials: null,
     });
 
     expect(ch.delegatedCredentials()).toBeUndefined();
@@ -487,4 +562,74 @@ describe("PhoenixChannel reconnect", () => {
 
     expect(reconnected).toBe(false);
   }, 10_000);
+});
+
+describe("a rejoin that returns no reading clears the last one", () => {
+  // The node mints a fresh set on every join, so the previous set is only ever
+  // valid for the join that produced it. The callback used to fire only when
+  // there WAS something to hand over, which left the wallet attaching the last
+  // join's credentials while `delegatedCredentials()` reported `undefined` —
+  // two answers to one question, and the wallet's is the one on the wire.
+  //
+  // Reached by rolling a node back, switching delegation off, or rejoining
+  // without naming a parent.
+  let wss: WebSocketServer;
+  let conn: Connection | null = null;
+
+  // The Connection is torn down HERE rather than at the end of the test, so a
+  // failed assertion does not leave the socket open and time the hook out.
+  afterEach(async () => {
+    conn?.close();
+    conn = null;
+    await delay(10);
+    if (wss) await new Promise<void>((r) => wss.close(() => r()));
+  });
+
+  const CRED = {
+    id: "urn:uuid:child",
+    parent_capability: "urn:uuid:parent",
+    credential_jwt: "a.b.c",
+  };
+
+  it("fires onDelegatedCredentials with undefined, so a holder can drop it", async () => {
+    let reply: Record<string, unknown> = {
+      capabilities: ["ephemeral_delegation/1"],
+      delegated_credentials: { status: "complete", credentials: [CRED] },
+    };
+
+    wss = ephemeralServer();
+    wss.on("connection", (ws: WS) => {
+      ws.on("message", (data: Buffer) => {
+        const [, ref, topic, event] = JSON.parse(data.toString()) as unknown[];
+        if (event === "phx_join") {
+          ws.send(
+            JSON.stringify([
+              ref, ref, topic, "phx_reply",
+              { status: "ok", response: { did: "did:web:test", ...reply } },
+            ]),
+          );
+        }
+      });
+    });
+
+    const url = await readyUrl(wss);
+    conn = new Connection(url, "test-api-key");
+    await conn.dial();
+
+    const seen: Array<DelegatedCredentialsReading | undefined> = [];
+    const ch = new Channel(conn, "did:web:test", {
+      onMessage: () => {},
+      onDelegatedCredentials: (_did, reading) => seen.push(reading),
+    });
+
+    await ch.join(["https://layr8.io/protocols/echo/1.0"]);
+    expect(ch.delegatedCredentials()).toEqual({ status: "complete", credentials: [CRED] });
+
+    // The node no longer returns a reading — rolled back, or delegation off.
+    reply = { capabilities: [] };
+    await ch.rejoin();
+
+    expect(ch.delegatedCredentials()).toBeUndefined();
+    expect(seen).toEqual([{ status: "complete", credentials: [CRED] }, undefined]);
+  });
 });

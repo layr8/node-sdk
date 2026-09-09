@@ -37,7 +37,11 @@ import {
   parseDIDComm,
 } from "./message.js";
 import { Connection } from "./connection.js";
-import { Channel, type ServerReply } from "./channel.js";
+import {
+  Channel,
+  type DelegatedCredentialsReading,
+  type ServerReply,
+} from "./channel.js";
 import { RestClient, restUrlFromWebSocket } from "./rest.js";
 import { McpBinding, DEFAULT_MCP_BASE } from "./mcp.js";
 import { Wallet } from "./wallet.js";
@@ -430,7 +434,7 @@ export class Layr8Client extends EventEmitter {
       this.cfg.agentDid,
       {
         onMessage: (payload) => this.dispatchInbound(channel, payload),
-        onDelegatedCredentials: (did, creds) => this.wallet?.seed(did, creds),
+        onDelegatedCredentials: (did, reading) => this.applyDelegated(did, reading),
       },
       this.cfg.didSpec,
     );
@@ -490,7 +494,7 @@ export class Layr8Client extends EventEmitter {
         // Fires on every join AND rejoin, so a reconnected agent is holding
         // the credentials the node minted for its CURRENT DID document, not
         // the ones from a document a rejoin replaced.
-        onDelegatedCredentials: (holder, creds) => this.wallet?.seed(holder, creds),
+        onDelegatedCredentials: (holder, reading) => this.applyDelegated(holder, reading),
       },
       opts.didSpec,
     );
@@ -519,6 +523,28 @@ export class Layr8Client extends EventEmitter {
     }
 
     return new DidHandle(this, channel);
+  }
+
+  /**
+   * Put a join's delegation reading into the wallet, replacing whatever the
+   * previous join left there.
+   *
+   * `undefined` — no reading — CLEARS it. That is not the same as seeding an
+   * empty set for tidiness: the previous set was minted for a DID document
+   * this join may have replaced, and the node that would have re-minted it
+   * returned nothing. Keeping it would put credentials on the wire that
+   * `delegatedCredentials()` says do not exist.
+   *
+   * A `"partial"` or `"unread"` reading seeds what it carries and no more; the
+   * caller learns which from `delegatedCredentials()`. The wallet is not the
+   * place to record why something is missing.
+   */
+  private applyDelegated(
+    did: string,
+    reading: DelegatedCredentialsReading | undefined,
+  ): void {
+    if (reading) this.wallet?.seed(did, reading.credentials);
+    else this.wallet?.forgetDelivered(did);
   }
 
   /**
@@ -554,9 +580,15 @@ export class Layr8Client extends EventEmitter {
         const ch = this.didChannels.get(did);
         ch?.leave();
       } catch { /* ignore */ }
+      // `leaveDid` does this and `close` did not, which made the two paths
+      // disagree about whether a left DID still holds delegated credentials.
+      this.wallet?.forgetDelivered(did);
     }
     this.didChannels.clear();
     this.didHandlers.clear();
+    if (this.primaryChannel) {
+      this.wallet?.forgetDelivered(this.primaryChannel.assignedDID() || this.cfg.agentDid);
+    }
 
     if (this.connection) {
       this.connection.close();

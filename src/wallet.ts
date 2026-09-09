@@ -396,6 +396,11 @@ export class Wallet {
    * have replaced. Keeping both would put dead credentials on the wire and
    * make the live one's slot under `MAX_ATTACHED` a matter of ordering.
    *
+   * "A fresh set on every join" only holds if something calls this (or
+   * `forgetDelivered`) on every join. `Layr8Client.applyDelegated` is that
+   * something, and it runs even when the reply carried no reading — which is
+   * precisely when the previous set is most likely to be wrong.
+   *
    * An entry that does not parse as a grant is dropped here rather than at
    * send time, exactly as one read over REST is.
    */

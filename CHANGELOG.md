@@ -17,12 +17,12 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
   `plugin.parent.not-hosted-here`.
 
 - **The join reply carries the credentials the node signed for this DID.**
-  `Channel.delegatedCredentials()` returns one entry per grant the named
-  parent holds — the node signs them at join, narrowed to no more than the
-  parent carries and citing it in
-  `credentialSubject.delegation.parentCapability`. When `attachGrants` is on
-  they are attached to outbound messages automatically; there is nothing to
-  wire up.
+  `Channel.delegatedCredentials()` returns a `DelegatedCredentialsReading` —
+  `{ status, credentials }` — with one entry per grant the named parent holds.
+  The node signs them at join, narrowed to no more than the parent carries and
+  citing it in `credentialSubject.delegation.parentCapability`. When
+  `attachGrants` is on they are attached to outbound messages automatically;
+  there is nothing to wire up.
 
   **There is nothing to select, and no field for selecting one.**
   `DidSpec.parentRole` was removed before it was ever released, and a node
@@ -30,11 +30,25 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
   believes it asked for one role while borrowing everything is a client
   nothing would ever correct.
 
-  **Three readings, kept apart.** `delegatedCredentials()` is `undefined` when
-  the join named no parent, `[]` when the parent's wallet was read and holds no
-  grants, and `undefined` again when `supportsEphemeralDelegation()` is false —
-  a node that never looked. Coalescing any pair of those reports something
-  nobody measured.
+  **Five readings, kept apart, and `status` is why the value is an object.**
+
+  | `delegatedCredentials()` | `supportsEphemeralDelegation()` | Meaning |
+  |---|---|---|
+  | `undefined` | `true` | the join named no parent |
+  | `{status: "complete", credentials: []}` | `true` | the parent's wallet was **read** and it grants nothing |
+  | `{status: "complete", credentials: [...]}` | `true` | read, and here is all of it |
+  | `{status: "partial", credentials: [...]}` | `true` | read, and some of it could not be delegated — there is more you did not get |
+  | `{status: "unread", credentials: []}` | `true` | the wallet could **not** be read; the `[]` measures nothing |
+  | `undefined` | `false` | the node never looked |
+
+  Coalescing any pair of those reports something nobody measured. Read
+  `status` before `credentials`; `?.credentials ?? []` turns four of the six
+  rows into the second, which is the only one that is a measurement.
+
+  A reading arrives on **every** join and rejoin, including one that carries no
+  reading at all — that clears whatever the previous join seeded, because the
+  node mints a fresh set per join and the previous set names a DID document a
+  rejoin may have replaced.
 
   **The credential exists nowhere but the join reply.** The node stores nothing
   about it, so no endpoint will hand it back; rejoin to be issued a new one. It
