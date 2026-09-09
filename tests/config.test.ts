@@ -127,6 +127,46 @@ describe("resolveConfig", () => {
   });
 });
 
+describe("didSpec.storage follows the identity kind", () => {
+  // cloud-node reclaims a twin joined with storage "ephemeral" the moment it
+  // disconnects, taking its mediator declaration with it. A fixed agentDid is a
+  // durable identity and must default to "persistent"; only a node-assigned
+  // per-session DID defaults to "ephemeral".
+  const base = { nodeUrl: "ws://localhost:4000/plugin_socket/websocket", apiKey: "k" };
+
+  it("defaults to persistent when agentDid is given in config", () => {
+    const cfg = resolveConfig({ ...base, agentDid: "did:web:node:agents:fixed" });
+    expect(cfg.didSpec.storage).toBe("persistent");
+    expect(cfg.didSpec.mode).toBe("Create");
+  });
+
+  it("defaults to persistent when the DID comes from LAYR8_AGENT_DID", () => {
+    const prev = process.env.LAYR8_AGENT_DID;
+    process.env.LAYR8_AGENT_DID = "did:web:node:agents:from-env";
+    try {
+      expect(resolveConfig(base).didSpec.storage).toBe("persistent");
+    } finally {
+      if (prev === undefined) delete process.env.LAYR8_AGENT_DID;
+      else process.env.LAYR8_AGENT_DID = prev;
+    }
+  });
+
+  it("stays ephemeral for a per-session DID", () => {
+    const prev = process.env.LAYR8_AGENT_DID;
+    delete process.env.LAYR8_AGENT_DID;
+    try {
+      expect(resolveConfig(base).didSpec.storage).toBe("ephemeral");
+    } finally {
+      if (prev !== undefined) process.env.LAYR8_AGENT_DID = prev;
+    }
+  });
+
+  it("an explicit didSpec.storage still wins", () => {
+    const cfg = resolveConfig({ ...base, agentDid: "did:web:node:agents:fixed", didSpec: { storage: "ephemeral" } });
+    expect(cfg.didSpec.storage).toBe("ephemeral");
+  });
+});
+
 describe("grant attachment options", () => {
   const originalEnv = { ...process.env };
   const base = { nodeUrl: "ws://localhost:4000", apiKey: "test-api-key" };

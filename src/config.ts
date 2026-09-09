@@ -298,8 +298,16 @@ export function resolveConfig(cfg: Config): ResolvedConfig {
     );
   }
 
+  // A FIXED identity (agentDid given) defaults to a PERSISTENT twin; only a
+  // node-assigned per-session DID defaults to ephemeral. Since cloud-node
+  // 4.19.3x (2026-09-08) an ephemeral twin is reclaimed the moment it
+  // disconnects, and everything stored on the twin — its mediator declaration
+  // above all — dies with it: messages sent while the agent was offline were
+  // dropped at the node instead of queued. An explicit cfg.didSpec.storage
+  // still wins, so a caller that wants a throwaway fixed DID can say so.
   const didSpec: Required<DidSpec> = {
     ...DEFAULT_DID_SPEC,
+    ...(agentDid ? { storage: "persistent" } : {}),
     ...cfg.didSpec,
     verificationMethods:
       cfg.didSpec?.verificationMethods ?? DEFAULT_DID_SPEC.verificationMethods,

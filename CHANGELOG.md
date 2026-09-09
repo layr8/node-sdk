@@ -86,6 +86,20 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
   carries no `credentialStatus` and is not individually revocable — authority
   is withdrawn by revoking or expiring the parent.
 
+### Fixed
+
+- **A fixed identity defaults to a persistent twin.** `didSpec.storage`
+  defaulted to `"ephemeral"` for every client, including one with a fixed
+  `agentDid` (config or `LAYR8_AGENT_DID`). Since cloud-node 4.19.3x
+  (2026-09-08) an ephemeral twin is reclaimed the moment it disconnects, and
+  everything stored on the twin — its mediator declaration above all — dies
+  with it: messages sent to the agent while it was offline were dropped at the
+  node instead of queued by its mediator, with no problem-report. A fixed
+  `agentDid` now defaults to `"persistent"`; a node-assigned per-session DID
+  still defaults to `"ephemeral"`; an explicit `didSpec.storage` still wins.
+  No API change.
+
+
 ## [0.2.7] - 2026-09-04
 
 ### Fixed
