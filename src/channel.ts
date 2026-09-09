@@ -15,11 +15,102 @@ export type { ServerReply };
  *   whole socket.
  * - `onReconnect` — fires after the Connection re-dials AND this Channel
  *   has successfully re-joined.
+ * - `onDelegatedCredentials` — fires after EVERY successful join and rejoin,
+ *   with the reading the node returned, or `undefined` when it returned none.
+ *
+ *   It fires **unconditionally**, including with `undefined`, and that is the
+ *   whole point of it. The node mints a fresh set on every join, so a holder
+ *   of the previous set has to be told to drop it — and the case where the
+ *   node returns nothing is exactly the case where the previous set is most
+ *   likely to be wrong (the node rolled back, delegation was switched off, or
+ *   the Channel rejoined without naming a parent). Firing only when there is
+ *   something to hand over leaves the last join's credentials in the wallet
+ *   while `delegatedCredentials()` reports there are none: two answers to one
+ *   question, and the wallet's is the one that reaches the wire.
  */
 export interface ChannelCallbacks {
   onMessage: (payload: unknown) => void;
   onDisconnect?: (err: Error) => void;
   onReconnect?: () => void;
+  onDelegatedCredentials?: (
+    did: string,
+    reading: DelegatedCredentialsReading | undefined,
+  ) => void;
+}
+
+/**
+ * One credential the node signed for this DID out of what its parent holds.
+ *
+ * `credential_jwt` is a compact JWS, ready to attach to an outbound message as
+ * `application/vc+jwt` — the same shape `GET /api/v1/credentials` returns, so
+ * the wallet parses it with no special case.
+ *
+ * **It exists nowhere but here.** The node stores nothing about it: a
+ * credential belonging to a connection has the lifetime of that connection.
+ * There is no endpoint that will hand it back, and losing the join reply means
+ * rejoining to be issued a new one.
+ */
+export interface DelegatedCredential {
+  /** The credential's own `id`. */
+  id: string;
+  /** The parent credential it cites in `credentialSubject.delegation.parentCapability`. */
+  parent_capability: string;
+  /** The signed credential, as a compact JWS. */
+  credential_jwt: string;
+}
+
+/**
+ * How completely the node read the parent's wallet.
+ *
+ * - `"complete"` — it was read and every grant in it was delegated.
+ *   `credentials` is the whole answer, and `[]` here is the measured statement
+ *   that the parent holds no grants.
+ * - `"partial"` — it was read and at least one grant could **not** be
+ *   delegated. `credentials` holds the rest, and there is authority the parent
+ *   has that this connection will never get. The node's log says why.
+ * - `"unread"` — it could not be read at all. `credentials` is `[]` and that
+ *   `[]` measures nothing.
+ */
+export type DelegationStatus = "complete" | "partial" | "unread";
+
+/**
+ * What one join learned about the parent's wallet.
+ *
+ * The node sends an object rather than a bare array precisely so that
+ * `"unread"` has a value of its own. When it was an array, an unreadable
+ * wallet arrived as `[]` — the same value that means "read, and it grants
+ * nothing" — and that is the reassuring one of the two: a client acting on it
+ * sends its messages bare and gets back a denial naming a grant.
+ */
+export interface DelegatedCredentialsReading {
+  status: DelegationStatus;
+  credentials: DelegatedCredential[];
+}
+
+const DELEGATION_STATUSES: readonly string[] = ["complete", "partial", "unread"];
+
+/**
+ * A join reply's `delegated_credentials`, or `undefined` if it is not a reading.
+ *
+ * Anything that is not a well-formed reading — absent, an array (an older node,
+ * before `status` existed), a status this build does not know — is `undefined`,
+ * which means "no reading". It is never coerced into
+ * `{status: "complete", credentials: []}`: that would state that a wallet was
+ * read and grants nothing, which is the one thing none of those inputs says.
+ */
+export function parseDelegatedCredentials(
+  raw: unknown,
+): DelegatedCredentialsReading | undefined {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const r = raw as { status?: unknown; credentials?: unknown };
+  if (typeof r.status !== "string" || !DELEGATION_STATUSES.includes(r.status)) {
+    return undefined;
+  }
+  if (!Array.isArray(r.credentials)) return undefined;
+  return {
+    status: r.status as DelegationStatus,
+    credentials: r.credentials as DelegatedCredential[],
+  };
 }
 
 /**
@@ -58,6 +149,12 @@ export class Channel {
 
   private joinRef = "";
   private assignedDIDVal = "";
+  /**
+   * `undefined` until a join reply that named a parent arrives — see
+   * `delegatedCredentials()`.
+   */
+  private delegatedVal: DelegatedCredentialsReading | undefined;
+  private ephemeralDelegationSupported = false;
   private protocols: string[] = [];
   private joined = false;
   private left = false;
@@ -186,6 +283,43 @@ export class Channel {
   }
 
   /**
+   * What this join learned about the parent's wallet, and what came back.
+   *
+   * **Five readings, and they are deliberately not two.** Collapsing any pair
+   * of them reports something nobody measured:
+   *
+   * | Value | `supportsEphemeralDelegation()` | Meaning |
+   * |---|---|---|
+   * | `undefined` | `true`  | this join named no parent, so nothing was delegated |
+   * | `{status: "complete", credentials: []}` | `true` | the parent's wallet was **read** and it holds no grants |
+   * | `{status: "complete", credentials: [...]}` | `true` | read, and here is all of it |
+   * | `{status: "partial", credentials: [...]}` | `true` | read, and some of it could not be delegated — there is more you did not get |
+   * | `{status: "unread", credentials: []}` | `true` | the wallet could **not** be read; the `[]` measures nothing |
+   * | `undefined` | `false` | the node predates delegation — it never looked |
+   *
+   * Do not write `delegatedCredentials()?.credentials ?? []` and treat the
+   * result as the parent's grants: that turns four of those six rows into the
+   * second one, and the second is the only one of them that is a measurement.
+   * Read `status` first.
+   *
+   * A fresh reading replaces the old one on every rejoin, because the node
+   * mints a fresh set per join — including a rejoin that comes back with no
+   * reading at all, which clears it.
+   */
+  delegatedCredentials(): DelegatedCredentialsReading | undefined {
+    return this.delegatedVal;
+  }
+
+  /**
+   * Whether the node advertised `ephemeral_delegation/1` at join. Without it,
+   * an absent `delegatedCredentials()` means the node never looked — not that
+   * the parent holds nothing.
+   */
+  supportsEphemeralDelegation(): boolean {
+    return this.ephemeralDelegationSupported;
+  }
+
+  /**
    * Whether the cloud-node supports the `reply_protocol/1` capability for
    * this Channel — set from `response.capabilities` in the join reply.
    * `false` until `join()` resolves; stays `false` if the server doesn't
@@ -266,15 +400,10 @@ export class Channel {
       didSpecPayload.controller = spec.controller;
     }
     // Same shape as `controller`: sent only when set, so a join that names no
-    // parent puts exactly the payload on the wire it put there before these
-    // fields existed. `parentRole` is sent independently of `parentDid` — the
-    // node refuses the pair rather than the SDK silently dropping a role the
-    // caller asked for.
+    // parent puts exactly the payload on the wire it put there before this
+    // field existed.
     if (spec.parentDid) {
       didSpecPayload.parentDid = spec.parentDid;
-    }
-    if (spec.parentRole) {
-      didSpecPayload.parentRole = spec.parentRole;
     }
 
     const joinPayload = {
@@ -325,7 +454,12 @@ export class Channel {
 
     const reply = rawReply as {
       status?: string;
-      response?: { did?: string; reason?: string; capabilities?: string[] };
+      response?: {
+        did?: string;
+        reason?: string;
+        capabilities?: string[];
+        delegated_credentials?: unknown;
+      };
     };
     if (reply.status !== "ok") {
       const reason =
@@ -337,6 +471,13 @@ export class Channel {
     // `reply_protocol/1` today.
     const caps = reply.response?.capabilities ?? [];
     this.replyProtocolEnabled = caps.includes("reply_protocol/1");
+    this.ephemeralDelegationSupported = caps.includes("ephemeral_delegation/1");
+
+    // `?? []` would be the bug this field exists to avoid: the node omits the
+    // key when the join named no parent, and otherwise sends a reading that
+    // says whether it could read the parent's wallet at all. Only a
+    // well-formed reading is a reading.
+    this.delegatedVal = parseDelegatedCredentials(reply.response?.delegated_credentials);
     if (reply.response?.did) {
       this.assignedDIDVal = reply.response.did;
       // Auto-DID path: only when the Channel was constructed with an
@@ -351,6 +492,17 @@ export class Channel {
         this.topic = newTopic;
       }
     }
+    // AFTER the topic rekey, because `this.did` is derived from the topic and
+    // the credentials are keyed by the DID that holds them. On the auto-DID
+    // path it is "" until the line above runs, and a wallet seeded under ""
+    // is a wallet nothing ever reads.
+    // UNCONDITIONAL, `undefined` included. A rejoin whose reply carries no
+    // reading is a rejoin after which the previous set must go: it was minted
+    // for a DID document this rejoin may have replaced, and the node that
+    // would have re-minted it did not. Firing only when there is something to
+    // hand over left the wallet attaching last join's credentials while
+    // `delegatedCredentials()` reported there were none.
+    this.callbacks.onDelegatedCredentials?.(this.did, this.delegatedVal);
   }
 }
 
@@ -439,6 +591,16 @@ export class PhoenixChannel {
 
   assignedDID(): string {
     return this.channel?.assignedDID() ?? "";
+  }
+
+  /** See `Channel.delegatedCredentials()` — delegates to the inner Channel. */
+  delegatedCredentials(): DelegatedCredentialsReading | undefined {
+    return this.channel?.delegatedCredentials();
+  }
+
+  /** See `Channel.supportsEphemeralDelegation()` — delegates to the inner Channel. */
+  supportsEphemeralDelegation(): boolean {
+    return this.channel?.supportsEphemeralDelegation() ?? false;
   }
 
   /** See `Channel.replyProtocol()` — delegates to the inner Channel. */

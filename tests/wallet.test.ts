@@ -482,3 +482,123 @@ describe("toolNameOf", () => {
 // the code LOOKED like it attached; `attach-grants.test.ts` drives a real client
 // against a fake node and reads the attachment off the wire, which is the claim
 // that was actually wanted. A grep and a behaviour are not the same evidence.
+
+describe("Wallet — credentials delivered in a join reply", () => {
+  /**
+   * An ephemeral DID's delegated credentials exist NOWHERE but the join reply.
+   * Nothing on the node stores them, so `GET /api/v1/credentials` returns
+   * nothing for that DID — forever, not transiently. A wallet that only reads
+   * REST holds an empty wallet for a DID that was just handed authority, and
+   * the failure is the silent one this file's header is about: the message
+   * goes out bare and the denial names a grant instead of an attachment.
+   */
+  const jwt = (payload: unknown) =>
+    `hdr.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.sig`;
+
+  const delegated = (id: string) => ({
+    id,
+    parent_capability: "urn:uuid:parent",
+    credential_jwt: jwt({
+      id,
+      credentialSubject: {
+        scope: [{ protocol: PROTO, messageTypes: ["*"] }],
+        delegation: { parentCapability: "urn:uuid:parent" },
+      },
+    }),
+  });
+
+  const emptyReader = () => {
+    const get = vi.fn().mockResolvedValue({ credentials: [] });
+    return { get, reader: { get } as { get<T>(p: string): Promise<T> } };
+  };
+
+  it("attaches a seeded credential the node's own endpoint will never return", async () => {
+    const { reader } = emptyReader();
+    const w = new Wallet(reader);
+    w.seed(AGENT, [delegated("urn:uuid:child")]);
+
+    const attachments = await w.attachmentsFor(AGENT, {
+      recipients: [AGENT],
+      typeUri: `${PROTO}/note`,
+    });
+
+    expect(attachments.map((a) => a.id)).toEqual(["urn:uuid:child"]);
+  });
+
+  it("REPLACES on reseed — the node mints a fresh set on every join", async () => {
+    // Merging would keep credentials issued to a DID document a rejoin
+    // replaced. Those are dead, they consume slots under MAX_ATTACHED, and
+    // whether the live one survives becomes a matter of ordering.
+    const { reader } = emptyReader();
+    const w = new Wallet(reader);
+    w.seed(AGENT, [delegated("urn:uuid:first")]);
+    w.seed(AGENT, [delegated("urn:uuid:second")]);
+
+    const attachments = await w.attachmentsFor(AGENT, {
+      recipients: [AGENT],
+      typeUri: `${PROTO}/note`,
+    });
+
+    expect(attachments.map((a) => a.id)).toEqual(["urn:uuid:second"]);
+  });
+
+  it("survives a failed read, because it does not come from that read", async () => {
+    // Dropping a delivered credential because an unrelated REST read failed
+    // would withhold authority the node would have honoured — the exact
+    // asymmetry this file's header names: under-attaching fails silently.
+    const get = vi.fn().mockRejectedValue(new Error("node unreachable"));
+    const w = new Wallet({ get } as { get<T>(p: string): Promise<T> });
+    w.seed(AGENT, [delegated("urn:uuid:child")]);
+
+    const attachments = await w.attachmentsFor(AGENT, {
+      recipients: [AGENT],
+      typeUri: `${PROTO}/note`,
+    });
+
+    expect(attachments.map((a) => a.id)).toEqual(["urn:uuid:child"]);
+  });
+
+  it("still reports a failed read when the delivered set is the empty one", async () => {
+    // "Nothing was delivered" must not silence "the node could not be read".
+    // The caller learns about the second through the throw, and `onGrantMiss`
+    // is the only place a read failure is ever announced.
+    const get = vi.fn().mockRejectedValue(new Error("node unreachable"));
+    const w = new Wallet({ get } as { get<T>(p: string): Promise<T> });
+
+    await expect(
+      w.attachmentsFor(AGENT, { recipients: [AGENT], typeUri: `${PROTO}/note` }),
+    ).rejects.toThrow("node unreachable");
+  });
+
+  it("forgets on leave — authority ends with the connection that was issued it", async () => {
+    const { reader } = emptyReader();
+    const w = new Wallet(reader);
+    w.seed(AGENT, [delegated("urn:uuid:child")]);
+    w.forgetDelivered(AGENT);
+
+    const attachments = await w.attachmentsFor(AGENT, {
+      recipients: [AGENT],
+      typeUri: `${PROTO}/note`,
+    });
+
+    expect(attachments).toEqual([]);
+  });
+
+  it("does not lapse on the read cache's TTL", async () => {
+    // The TTL exists to re-read a source that will never hold these. Ageing
+    // them out of it would make a long-lived agent's authority expire for a
+    // reason unrelated to its credential.
+    const { reader } = emptyReader();
+    const w = new Wallet(reader, 1);
+    w.seed(AGENT, [delegated("urn:uuid:child")]);
+
+    await new Promise((r) => setTimeout(r, 20));
+
+    const attachments = await w.attachmentsFor(AGENT, {
+      recipients: [AGENT],
+      typeUri: `${PROTO}/note`,
+    });
+
+    expect(attachments.map((a) => a.id)).toEqual(["urn:uuid:child"]);
+  });
+});
