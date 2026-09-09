@@ -1,4 +1,5 @@
 import { Layr8Error } from "./errors.js";
+import { type ChildNameSource, resolveBorrowerDid } from "./child-did.js";
 
 /** Verification method purpose for DID creation. */
 export interface VerificationMethod {
@@ -43,8 +44,29 @@ export interface DidSpec {
    * the parent holds is delegated. That is why there is no companion field
    * naming a role — `parentRole` was removed, and a node refuses a join that
    * still carries it rather than ignoring it.
+   *
+   * The DID that names a parent must be named BENEATH it —
+   * `<parentDid>:<segment>` — and the node refuses one that is not, with
+   * `plugin.child.not-beneath-parent`. Leave `agentDid` empty and this SDK
+   * generates a conforming name; see `child-did.ts` for the rule and why the
+   * shape is fixed.
    */
   parentDid?: string;
+  /**
+   * Who chose the segment of this DID's name: `"sdk"` when this library
+   * generated it, `"client"` when the caller supplied the whole DID.
+   *
+   * Set by `resolveConfig`; there is no reason for a caller to set it, and a
+   * value it sets is overwritten whenever a parent is named. It is on the wire
+   * because a generated name and a hand-built one that conforms are otherwise
+   * identical bytes, and the node's log would then be unable to say whether a
+   * malformed borrower DID came from this library or from a caller.
+   *
+   * `""` is *not stated* — an older client, or a join naming no parent at all.
+   * It is never read as `"client"`, which would claim a caller chose a name
+   * when nothing measured that.
+   */
+  childNameSource?: ChildNameSource | "";
 }
 
 /** Default DID specification matching the original hardcoded behavior. */
@@ -55,6 +77,7 @@ export const DEFAULT_DID_SPEC: Required<DidSpec> = {
   type: "plugin",
   controller: "",
   parentDid: "",
+  childNameSource: "",
   verificationMethods: [
     { purpose: "authentication" },
     { purpose: "assertionMethod" },
@@ -282,10 +305,18 @@ export function resolveConfig(cfg: Config): ResolvedConfig {
       cfg.didSpec?.verificationMethods ?? DEFAULT_DID_SPEC.verificationMethods,
   };
 
+  // A DID that names a parent has to be named beneath it. Settled HERE rather
+  // than in the Channel, so that `agentDid` — which the wallet, the `from` of
+  // every outbound message and `client.did()` all read — is the DID the join
+  // actually uses. Deriving it later would leave those reading an empty string
+  // while the socket spoke as somebody.
+  const borrower = resolveBorrowerDid(agentDid, didSpec.parentDid);
+  didSpec.childNameSource = borrower.childNameSource ?? "";
+
   return {
     nodeUrl: normalizedUrl,
     apiKey,
-    agentDid,
+    agentDid: borrower.did,
     didSpec,
     mediator: blankToNull(cfg.mediator ?? process.env.LAYR8_MEDIATOR_DID),
     mediatorLive: cfg.mediatorLive ?? envBool(process.env.LAYR8_MEDIATOR_LIVE) ?? true,

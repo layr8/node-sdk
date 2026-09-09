@@ -1,6 +1,7 @@
 import { Connection, type ConnectionCallbacks, type ServerReply } from "./connection.js";
 import type { DidSpec } from "./config.js";
 import { DEFAULT_DID_SPEC } from "./config.js";
+import { resolveBorrowerDid } from "./child-did.js";
 import { ConnectionError, NotConnectedError } from "./errors.js";
 
 export type { ServerReply };
@@ -165,14 +166,23 @@ export class Channel {
     callbacks: ChannelCallbacks,
     didSpec?: DidSpec,
   ) {
-    this.topic = `plugins:${did}`;
     this.callbacks = callbacks;
-    this.didSpec = {
+    const merged: Required<DidSpec> = {
       ...DEFAULT_DID_SPEC,
       ...didSpec,
       verificationMethods:
         didSpec?.verificationMethods ?? DEFAULT_DID_SPEC.verificationMethods,
     };
+
+    // `resolveConfig` has already settled the primary Channel's DID; this
+    // covers every OTHER Channel, which is handed a DID by its caller and
+    // never passes through there. Both paths run the same rule, so a DID that
+    // names a parent it is not beneath fails locally instead of at the join.
+    const borrower = resolveBorrowerDid(did, merged.parentDid);
+    merged.childNameSource = borrower.childNameSource ?? "";
+
+    this.topic = `plugins:${borrower.did}`;
+    this.didSpec = merged;
     connection.registerChannel(this);
   }
 
@@ -404,6 +414,13 @@ export class Channel {
     // field existed.
     if (spec.parentDid) {
       didSpecPayload.parentDid = spec.parentDid;
+    }
+    // Sent only when a parent was named and somebody therefore chose a
+    // borrower's name. An empty value is not sent at all, so "this client does
+    // not report it" stays a third answer rather than becoming "the caller
+    // chose it".
+    if (spec.childNameSource) {
+      didSpecPayload.childNameSource = spec.childNameSource;
     }
 
     const joinPayload = {

@@ -175,7 +175,13 @@ describe("PhoenixChannel parent authority", () => {
     if (server) await server.close();
   });
 
-  async function joinPayloadFor(didSpec?: DidSpec): Promise<Record<string, unknown>> {
+  // The DID defaults to one that names no parent. A case that DOES name a
+  // parent must pass a DID beneath it, or `resolveBorrowerDid` throws before a
+  // frame is written — which is the rule under test two describes below.
+  async function joinPayloadFor(
+    didSpec?: DidSpec,
+    did = "did:web:test",
+  ): Promise<Record<string, unknown>> {
     server = new MockPhoenixServer();
     const wsUrl = await server.ready();
 
@@ -194,7 +200,7 @@ describe("PhoenixChannel parent authority", () => {
     const ch = new PhoenixChannel(
       wsUrl,
       "test-api-key",
-      "did:web:test",
+      did,
       { onMessage: () => {} },
       didSpec,
     );
@@ -206,13 +212,59 @@ describe("PhoenixChannel parent authority", () => {
   }
 
   it("carries parentDid to the node when it is set", async () => {
-    const didSpec = await joinPayloadFor({
-      mode: "Create",
-      storage: "ephemeral",
-      parentDid: "did:web:acme.example:users:alice",
-    });
+    const didSpec = await joinPayloadFor(
+      {
+        mode: "Create",
+        storage: "ephemeral",
+        parentDid: "did:web:acme.example:users:alice",
+      },
+      "did:web:acme.example:users:alice:k7m2q9x4h3bd",
+    );
 
     expect(didSpec.parentDid).toBe("did:web:acme.example:users:alice");
+  });
+
+  it("reports who chose the name, and does not send the key when nobody did", async () => {
+    // A DID the caller supplied and a DID this library generated are otherwise
+    // identical bytes on the wire.
+    const named = await joinPayloadFor(
+      {
+        parentDid: "did:web:acme.example:users:alice",
+      },
+      "did:web:acme.example:users:alice:k7m2q9x4h3bd",
+    );
+    expect(named.childNameSource).toBe("client");
+
+    const unparented = await joinPayloadFor();
+    expect("childNameSource" in unparented).toBe(false);
+  });
+
+  it("a DID that is not beneath its parent never reaches the node", async () => {
+    // The node refuses this join with `plugin.child.not-beneath-parent`. This
+    // library refuses it first, so the failure lands where the DID was written
+    // rather than at connect time in a deployment.
+    server = new MockPhoenixServer();
+    const wsUrl = await server.ready();
+
+    const ch = new PhoenixChannel(
+      wsUrl,
+      "test-api-key",
+      "did:web:acme.example:agents:unrelated",
+      { onMessage: () => {} },
+      { parentDid: "did:web:acme.example:users:alice" },
+    );
+
+    let joined = false;
+    server.onMsg = (msg) => {
+      if (msg.event === "phx_join") joined = true;
+    };
+
+    await expect(
+      ch.connect(["https://layr8.io/protocols/echo/1.0"]),
+    ).rejects.toThrow(/not named beneath its parent/);
+
+    expect(joined).toBe(false);
+    ch.close();
   });
 
   it("omits the key entirely when no parent is named", async () => {
@@ -228,10 +280,13 @@ describe("PhoenixChannel parent authority", () => {
     // looks like arriving through a loosely typed config. Sending it would get
     // the join REFUSED by the node — correct behaviour on the node's part, and
     // a refusal this SDK has no business provoking now the field is not ours.
-    const didSpec = await joinPayloadFor({
-      parentDid: "did:web:acme.example:users:alice",
-      parentRole: "did:web:acme.example:roles:operator",
-    } as DidSpec);
+    const didSpec = await joinPayloadFor(
+      {
+        parentDid: "did:web:acme.example:users:alice",
+        parentRole: "did:web:acme.example:roles:operator",
+      } as DidSpec,
+      "did:web:acme.example:users:alice:k7m2q9x4h3bd",
+    );
 
     expect("parentRole" in didSpec).toBe(false);
     expect(didSpec.parentDid).toBe("did:web:acme.example:users:alice");
