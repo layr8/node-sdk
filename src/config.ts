@@ -37,15 +37,14 @@ export interface DidSpec {
    * swept away would leave a child that nobody can withdraw and nobody can
    * keep.
    *
-   * Naming a parent does not yet cause anything to be signed or minted.
+   * Naming an accepted parent causes the node to sign one credential for this
+   * DID per grant that parent holds, and to return them in the join reply
+   * (`Channel.delegatedCredentials()`). There is NOTHING to select: everything
+   * the parent holds is delegated. That is why there is no companion field
+   * naming a role — `parentRole` was removed, and a node refuses a join that
+   * still carries it rather than ignoring it.
    */
   parentDid?: string;
-  /**
-   * The role the parent's authority is borrowed through.
-   * Optional, and only meaningful alongside `parentDid` — the node refuses a
-   * `parentRole` with no `parentDid` rather than ignoring it.
-   */
-  parentRole?: string;
 }
 
 /** Default DID specification matching the original hardcoded behavior. */
@@ -56,7 +55,6 @@ export const DEFAULT_DID_SPEC: Required<DidSpec> = {
   type: "plugin",
   controller: "",
   parentDid: "",
-  parentRole: "",
   verificationMethods: [
     { purpose: "authentication" },
     { purpose: "assertionMethod" },

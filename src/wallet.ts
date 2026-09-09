@@ -340,6 +340,18 @@ export class Wallet {
   private cache = new Map<string, { at: number; creds: Promise<HeldCredential[]> }>();
 
   /**
+   * Credentials handed to this DID in its join reply, which exist NOWHERE
+   * ELSE.
+   *
+   * An ephemeral DID's delegated credentials are not stored on the node — that
+   * is the point of them — so `GET /api/v1/credentials` returns nothing for
+   * such a DID, forever. Held apart from `cache` for two reasons that both
+   * matter: they must not lapse on a TTL that exists to re-read a source that
+   * will never have them, and they must survive a failed read of that source.
+   */
+  private delivered = new Map<string, HeldCredential[]>();
+
+  /**
    * `reader` is the SDK's `RestClient`, not `fetch`. That is a repo convention
    * with a reason: the REST client goes through `node:http` and sets the Host
    * header itself, which is what makes `*.localhost` resolve in local
@@ -374,6 +386,31 @@ export class Wallet {
   refresh(did?: string): void {
     if (did === undefined) this.cache.clear();
     else this.cache.delete(did);
+  }
+
+  /**
+   * Record what a join reply handed to `did`, replacing anything held before.
+   *
+   * REPLACING, not merging: the node mints a fresh set on every join, and the
+   * previous set names credentials issued to a DID document that a rejoin may
+   * have replaced. Keeping both would put dead credentials on the wire and
+   * make the live one's slot under `MAX_ATTACHED` a matter of ordering.
+   *
+   * An entry that does not parse as a grant is dropped here rather than at
+   * send time, exactly as one read over REST is.
+   */
+  seed(did: string, records: ReadonlyArray<object>): void {
+    const creds = records
+      .map((r) => parseCredential(r as Record<string, unknown>))
+      .filter((c): c is HeldCredential => c !== null);
+
+    if (creds.length === 0) this.delivered.delete(did);
+    else this.delivered.set(did, creds);
+  }
+
+  /** Forget what was delivered to `did` — called when its Channel is left. */
+  forgetDelivered(did: string): void {
+    this.delivered.delete(did);
   }
 
   async heldBy(did: string, now: number = Date.now()): Promise<HeldCredential[]> {
@@ -424,7 +461,25 @@ export class Wallet {
     msg: { recipients: string[]; typeUri: string; body?: unknown },
     onCapped?: (info: { covering: number; attached: number }) => void,
   ): Promise<VgAttachment[]> {
-    const creds = await this.heldBy(did);
+    const delivered = this.delivered.get(did) ?? [];
+
+    // A failed read is still announced to the caller — via the throw — when it
+    // is the only source this DID has. When the join reply already handed us
+    // credentials, it is not: they exist independently of the node's
+    // credential endpoint, and dropping them because an unrelated read failed
+    // would withhold authority the node would have honoured. That asymmetry is
+    // the one this file's header states: under-attaching costs a working call
+    // and fails silently.
+    let read: HeldCredential[];
+    try {
+      read = await this.heldBy(did);
+    } catch (err) {
+      if (delivered.length === 0) throw err;
+      read = [];
+    }
+
+    const creds = delivered.length === 0 ? read : [...delivered, ...read];
+
     return selectFor(
       creds,
       {

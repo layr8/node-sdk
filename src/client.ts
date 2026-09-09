@@ -430,6 +430,7 @@ export class Layr8Client extends EventEmitter {
       this.cfg.agentDid,
       {
         onMessage: (payload) => this.dispatchInbound(channel, payload),
+        onDelegatedCredentials: (did, creds) => this.wallet?.seed(did, creds),
       },
       this.cfg.didSpec,
     );
@@ -486,6 +487,10 @@ export class Layr8Client extends EventEmitter {
       did,
       {
         onMessage: (payload) => this.dispatchInbound(channel, payload),
+        // Fires on every join AND rejoin, so a reconnected agent is holding
+        // the credentials the node minted for its CURRENT DID document, not
+        // the ones from a document a rejoin replaced.
+        onDelegatedCredentials: (holder, creds) => this.wallet?.seed(holder, creds),
       },
       opts.didSpec,
     );
@@ -527,6 +532,11 @@ export class Layr8Client extends EventEmitter {
     channel.leave();
     this.didChannels.delete(did);
     this.didHandlers.delete(did);
+    // A delegated credential's authority ends with the connection that was
+    // issued it. Keeping it after the leave would put a credential naming a
+    // swept DID on the wire and get a denial that names the grant rather than
+    // the identity.
+    this.wallet?.forgetDelivered(did);
   }
 
   /** Gracefully shut down the client. Leaves every Channel and closes the WS. */

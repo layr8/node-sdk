@@ -9,14 +9,37 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
 ### Added
 
 - **A join can name the parent whose authority its DID borrows.**
-  `DidSpec.parentDid` and `DidSpec.parentRole` are optional and are sent only
-  when set, so a join that names no parent puts exactly the payload on the
-  wire it did before. The cloud-node refuses a parent that is not a
-  persistent identity it hosts, and the three refusals are distinguishable on
-  the wire: `plugin.parent.not-persistent`, `plugin.parent.not-found`,
-  `plugin.parent.not-hosted-here`. A `parentRole` with no `parentDid` is sent
-  and refused rather than dropped. Naming a parent does not yet cause
-  anything to be signed or minted.
+  `DidSpec.parentDid` is optional and is sent only when set, so a join that
+  names no parent puts exactly the payload on the wire it did before. The
+  cloud-node refuses a parent that is not a persistent identity it hosts, and
+  the three refusals are distinguishable on the wire:
+  `plugin.parent.not-persistent`, `plugin.parent.not-found`,
+  `plugin.parent.not-hosted-here`.
+
+- **The join reply carries the credentials the node signed for this DID.**
+  `Channel.delegatedCredentials()` returns one entry per grant the named
+  parent holds — the node signs them at join, narrowed to no more than the
+  parent carries and citing it in
+  `credentialSubject.delegation.parentCapability`. When `attachGrants` is on
+  they are attached to outbound messages automatically; there is nothing to
+  wire up.
+
+  **There is nothing to select, and no field for selecting one.**
+  `DidSpec.parentRole` was removed before it was ever released, and a node
+  refuses a join that still carries it rather than ignoring it: a client that
+  believes it asked for one role while borrowing everything is a client
+  nothing would ever correct.
+
+  **Three readings, kept apart.** `delegatedCredentials()` is `undefined` when
+  the join named no parent, `[]` when the parent's wallet was read and holds no
+  grants, and `undefined` again when `supportsEphemeralDelegation()` is false —
+  a node that never looked. Coalescing any pair of those reports something
+  nobody measured.
+
+  **The credential exists nowhere but the join reply.** The node stores nothing
+  about it, so no endpoint will hand it back; rejoin to be issued a new one. It
+  carries no `credentialStatus` and is not individually revocable — authority
+  is withdrawn by revoking or expiring the parent.
 
 ## [0.2.7] - 2026-09-04
 

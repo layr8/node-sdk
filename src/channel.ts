@@ -15,11 +15,39 @@ export type { ServerReply };
  *   whole socket.
  * - `onReconnect` — fires after the Connection re-dials AND this Channel
  *   has successfully re-joined.
+ * - `onDelegatedCredentials` — fires after EVERY successful join and rejoin
+ *   that named a parent, with the credentials the node signed for this DID.
+ *   It fires on a rejoin too because the node mints a fresh set each time and
+ *   the old ones name a DID document that may no longer exist. A join that
+ *   named no parent does not fire it at all — see
+ *   `Channel.delegatedCredentials()` for why absent and empty are kept apart.
  */
 export interface ChannelCallbacks {
   onMessage: (payload: unknown) => void;
   onDisconnect?: (err: Error) => void;
   onReconnect?: () => void;
+  onDelegatedCredentials?: (did: string, credentials: DelegatedCredential[]) => void;
+}
+
+/**
+ * One credential the node signed for this DID out of what its parent holds.
+ *
+ * `credential_jwt` is a compact JWS, ready to attach to an outbound message as
+ * `application/vc+jwt` — the same shape `GET /api/v1/credentials` returns, so
+ * the wallet parses it with no special case.
+ *
+ * **It exists nowhere but here.** The node stores nothing about it: a
+ * credential belonging to a connection has the lifetime of that connection.
+ * There is no endpoint that will hand it back, and losing the join reply means
+ * rejoining to be issued a new one.
+ */
+export interface DelegatedCredential {
+  /** The credential's own `id`. */
+  id: string;
+  /** The parent credential it cites in `credentialSubject.delegation.parentCapability`. */
+  parent_capability: string;
+  /** The signed credential, as a compact JWS. */
+  credential_jwt: string;
 }
 
 /**
@@ -58,6 +86,12 @@ export class Channel {
 
   private joinRef = "";
   private assignedDIDVal = "";
+  /**
+   * `undefined` until a join reply that named a parent arrives — see
+   * `delegatedCredentials()`.
+   */
+  private delegatedVal: DelegatedCredential[] | undefined;
+  private ephemeralDelegationSupported = false;
   private protocols: string[] = [];
   private joined = false;
   private left = false;
@@ -186,6 +220,34 @@ export class Channel {
   }
 
   /**
+   * The credentials the node signed for this DID out of what its parent holds.
+   *
+   * **Three readings, and they are deliberately not two.** Collapsing any pair
+   * of them would report something nobody measured:
+   *
+   * | Value | `supportsEphemeralDelegation()` | Meaning |
+   * |---|---|---|
+   * | `undefined` | `true`  | this join named no parent, so nothing was delegated |
+   * | `[]`        | `true`  | the parent's wallet was read and it holds no grants |
+   * | `undefined` | `false` | the node predates delegation — it never looked |
+   *
+   * A fresh set replaces the old one on every rejoin, because the node mints
+   * one per join.
+   */
+  delegatedCredentials(): DelegatedCredential[] | undefined {
+    return this.delegatedVal;
+  }
+
+  /**
+   * Whether the node advertised `ephemeral_delegation/1` at join. Without it,
+   * an absent `delegatedCredentials()` means the node never looked — not that
+   * the parent holds nothing.
+   */
+  supportsEphemeralDelegation(): boolean {
+    return this.ephemeralDelegationSupported;
+  }
+
+  /**
    * Whether the cloud-node supports the `reply_protocol/1` capability for
    * this Channel — set from `response.capabilities` in the join reply.
    * `false` until `join()` resolves; stays `false` if the server doesn't
@@ -266,15 +328,10 @@ export class Channel {
       didSpecPayload.controller = spec.controller;
     }
     // Same shape as `controller`: sent only when set, so a join that names no
-    // parent puts exactly the payload on the wire it put there before these
-    // fields existed. `parentRole` is sent independently of `parentDid` — the
-    // node refuses the pair rather than the SDK silently dropping a role the
-    // caller asked for.
+    // parent puts exactly the payload on the wire it put there before this
+    // field existed.
     if (spec.parentDid) {
       didSpecPayload.parentDid = spec.parentDid;
-    }
-    if (spec.parentRole) {
-      didSpecPayload.parentRole = spec.parentRole;
     }
 
     const joinPayload = {
@@ -325,7 +382,12 @@ export class Channel {
 
     const reply = rawReply as {
       status?: string;
-      response?: { did?: string; reason?: string; capabilities?: string[] };
+      response?: {
+        did?: string;
+        reason?: string;
+        capabilities?: string[];
+        delegated_credentials?: DelegatedCredential[];
+      };
     };
     if (reply.status !== "ok") {
       const reason =
@@ -337,6 +399,13 @@ export class Channel {
     // `reply_protocol/1` today.
     const caps = reply.response?.capabilities ?? [];
     this.replyProtocolEnabled = caps.includes("reply_protocol/1");
+    this.ephemeralDelegationSupported = caps.includes("ephemeral_delegation/1");
+
+    // `?? []` would be the bug this field exists to avoid: the node omits the
+    // key when the join named no parent and sends `[]` when it read the
+    // parent's wallet and found no grants. Only an ARRAY is a reading.
+    const delegated = reply.response?.delegated_credentials;
+    this.delegatedVal = Array.isArray(delegated) ? delegated : undefined;
     if (reply.response?.did) {
       this.assignedDIDVal = reply.response.did;
       // Auto-DID path: only when the Channel was constructed with an
@@ -350,6 +419,13 @@ export class Channel {
         this.connection.rekeyChannel(this.topic, newTopic);
         this.topic = newTopic;
       }
+    }
+    // AFTER the topic rekey, because `this.did` is derived from the topic and
+    // the credentials are keyed by the DID that holds them. On the auto-DID
+    // path it is "" until the line above runs, and a wallet seeded under ""
+    // is a wallet nothing ever reads.
+    if (this.delegatedVal) {
+      this.callbacks.onDelegatedCredentials?.(this.did, this.delegatedVal);
     }
   }
 }
@@ -439,6 +515,16 @@ export class PhoenixChannel {
 
   assignedDID(): string {
     return this.channel?.assignedDID() ?? "";
+  }
+
+  /** See `Channel.delegatedCredentials()` — delegates to the inner Channel. */
+  delegatedCredentials(): DelegatedCredential[] | undefined {
+    return this.channel?.delegatedCredentials();
+  }
+
+  /** See `Channel.supportsEphemeralDelegation()` — delegates to the inner Channel. */
+  supportsEphemeralDelegation(): boolean {
+    return this.channel?.supportsEphemeralDelegation() ?? false;
   }
 
   /** See `Channel.replyProtocol()` — delegates to the inner Channel. */

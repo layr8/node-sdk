@@ -199,45 +199,113 @@ describe("PhoenixChannel parent authority", () => {
     return payload.did_spec;
   }
 
-  it("carries parentDid and parentRole to the node when both are set", async () => {
+  it("carries parentDid to the node when it is set", async () => {
     const didSpec = await joinPayloadFor({
       mode: "Create",
       storage: "ephemeral",
       parentDid: "did:web:acme.example:users:alice",
-      parentRole: "did:web:acme.example:roles:operator",
     });
 
     expect(didSpec.parentDid).toBe("did:web:acme.example:users:alice");
-    expect(didSpec.parentRole).toBe("did:web:acme.example:roles:operator");
   });
 
-  it("carries parentDid alone", async () => {
-    const didSpec = await joinPayloadFor({
-      parentDid: "did:web:acme.example:users:alice",
-    });
-
-    expect(didSpec.parentDid).toBe("did:web:acme.example:users:alice");
-    expect("parentRole" in didSpec).toBe(false);
-  });
-
-  it("omits both keys entirely when no parent is named", async () => {
+  it("omits the key entirely when no parent is named", async () => {
     // Absent and empty are not the same value to the node: an absent key is
     // "the caller named no parent". Sending "" would be a value nobody chose.
     const didSpec = await joinPayloadFor();
 
     expect("parentDid" in didSpec).toBe(false);
-    expect("parentRole" in didSpec).toBe(false);
   });
 
-  it("still sends a parentRole with no parentDid, for the node to refuse", async () => {
-    // Dropping it here would turn a refusal the caller can read into a silent
-    // success that borrowed nothing.
+  it("never sends parentRole, whatever the caller sets (LAYR8-1129)", async () => {
+    // The field is gone from `DidSpec`, so this is what an old caller's object
+    // looks like arriving through a loosely typed config. Sending it would get
+    // the join REFUSED by the node — correct behaviour on the node's part, and
+    // a refusal this SDK has no business provoking now the field is not ours.
     const didSpec = await joinPayloadFor({
+      parentDid: "did:web:acme.example:users:alice",
       parentRole: "did:web:acme.example:roles:operator",
+    } as DidSpec);
+
+    expect("parentRole" in didSpec).toBe(false);
+    expect(didSpec.parentDid).toBe("did:web:acme.example:users:alice");
+  });
+});
+
+describe("PhoenixChannel delegated credentials (LAYR8-1129)", () => {
+  let server: MockPhoenixServer;
+
+  afterEach(async () => {
+    if (server) await server.close();
+  });
+
+  async function joinWithReply(response: Record<string, unknown>): Promise<PhoenixChannel> {
+    server = new MockPhoenixServer();
+    const wsUrl = await server.ready();
+
+    server.onMsg = (msg) => {
+      if (msg.event === "phx_join") {
+        server.sendToClient(msg.ref, msg.ref, msg.topic, "phx_reply", {
+          status: "ok",
+          response: { did: "did:web:node:test", ...response },
+        });
+      }
+    };
+
+    const ch = new PhoenixChannel(wsUrl, "test-api-key", "did:web:test", {
+      onMessage: () => {},
+    });
+    await ch.connect(["https://layr8.io/protocols/echo/1.0"]);
+    return ch;
+  }
+
+  it("carries what the node signed", async () => {
+    const ch = await joinWithReply({
+      capabilities: ["ephemeral_delegation/1"],
+      delegated_credentials: [
+        { id: "urn:uuid:child", parent_capability: "urn:uuid:parent", credential_jwt: "a.b.c" },
+      ],
     });
 
-    expect(didSpec.parentRole).toBe("did:web:acme.example:roles:operator");
-    expect("parentDid" in didSpec).toBe(false);
+    expect(ch.delegatedCredentials()).toEqual([
+      { id: "urn:uuid:child", parent_capability: "urn:uuid:parent", credential_jwt: "a.b.c" },
+    ]);
+    expect(ch.supportsEphemeralDelegation()).toBe(true);
+    ch.close();
+  });
+
+  it("keeps 'nobody asked', 'read and empty' and 'never looked' apart", async () => {
+    // Three facts, three values. `?? []` anywhere on this path turns the first
+    // or the third into the second, and the second is the only one of them
+    // that is a MEASUREMENT of the parent's wallet.
+    const noParent = await joinWithReply({ capabilities: ["ephemeral_delegation/1"] });
+    expect(noParent.delegatedCredentials()).toBeUndefined();
+    expect(noParent.supportsEphemeralDelegation()).toBe(true);
+    noParent.close();
+
+    const emptyWallet = await joinWithReply({
+      capabilities: ["ephemeral_delegation/1"],
+      delegated_credentials: [],
+    });
+    expect(emptyWallet.delegatedCredentials()).toEqual([]);
+    emptyWallet.close();
+
+    const oldNode = await joinWithReply({ capabilities: [] });
+    expect(oldNode.delegatedCredentials()).toBeUndefined();
+    expect(oldNode.supportsEphemeralDelegation()).toBe(false);
+    oldNode.close();
+  });
+
+  it("treats a non-array delegated_credentials as no reading at all", async () => {
+    // A node that sent `null` or an object read nothing we can use, and
+    // reading it as `[]` would report the parent's wallet as measured-empty.
+    const ch = await joinWithReply({
+      capabilities: ["ephemeral_delegation/1"],
+      delegated_credentials: null as unknown as [],
+    });
+
+    expect(ch.delegatedCredentials()).toBeUndefined();
+    ch.close();
   });
 });
 

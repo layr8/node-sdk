@@ -65,7 +65,7 @@ export {
   logErrors,
 } from "./errors.js";
 export type { ErrorHandler } from "./errors.js";
-export type { ServerReply } from "./channel.js";
+export type { ServerReply, DelegatedCredential } from "./channel.js";
 
 // REST client
 export { RESTError, postDidcomm } from "./rest.js";
