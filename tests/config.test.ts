@@ -93,6 +93,7 @@ describe("resolveConfig", () => {
       type: "plugin",
       controller: "",
       parentDid: "",
+      childNameSource: "",
       verificationMethods: [
         { purpose: "authentication" },
       ],

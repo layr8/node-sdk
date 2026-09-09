@@ -8,6 +8,37 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
 
 ### Added
 
+- **A DID that names a parent is now named beneath that parent, and this SDK
+  derives the name.** Pass `didSpec.parentDid` and leave `agentDid` empty, and
+  the client joins as `<parentDid>:<segment>` — twelve characters of Crockford
+  base32, generated once when the configuration is resolved, so a reconnect
+  returns under the same DID.
+
+  **This is a breaking change for a caller that already passes `parentDid`
+  with a DID of its own choosing.** The cloud-node now refuses such a join
+  with `plugin.child.not-beneath-parent`, and this client throws before the
+  join is written, naming the DID it expected. `parentDid` shipped days ago
+  and no released caller sets it, so there is no compatibility window.
+
+  **The reason the shape is fixed:** a cloud-node API key restricts which DIDs
+  it may bind, and an entry is either an exact DID or a prefix with a trailing
+  `*`. While a borrower's name was unrelated to its parent — and generated per
+  connection — no entry could be written for it in advance, so the only key
+  that admitted a borrower was one with *no restrictions at all*, which admits
+  every DID on the node. Named beneath its parent, one key carrying the parent
+  and `didNamespaceOf(parent)` admits the parent and its borrowers and nothing
+  else.
+
+  New exports: `didNamespaceOf`, `isBeneathParent`, `resolveBorrowerDid`,
+  `randomChildSegment`, `CHILD_SEGMENT_LENGTH`.
+
+  `didSpec.childNameSource` is sent alongside `parentDid` — `"sdk"` when this
+  library generated the segment, `"client"` when the caller supplied the whole
+  DID, and the key is **absent** when neither applies. A generated name and a
+  hand-built one that conforms are otherwise identical bytes, so without it a
+  malformed borrower DID could not be told apart as this library's defect from
+  a caller's typo.
+
 - **A join can name the parent whose authority its DID borrows.**
   `DidSpec.parentDid` is optional and is sent only when set, so a join that
   names no parent puts exactly the payload on the wire it did before. The

@@ -27,6 +27,17 @@ export type { McpCallOptions } from "./mcp.js";
 
 export type { Config, DidSpec, VerificationMethod } from "./config.js";
 export { DEFAULT_DID_SPEC } from "./config.js";
+// Naming a DID that borrows a parent's authority. `didNamespaceOf` is exported
+// because the API key that admits such a DID is written by hand from it, and a
+// key written with a different pattern is one the node's rule disagrees with.
+export {
+  CHILD_SEGMENT_LENGTH,
+  didNamespaceOf,
+  isBeneathParent,
+  randomChildSegment,
+  resolveBorrowerDid,
+} from "./child-did.js";
+export type { BorrowerDid, ChildNameSource } from "./child-did.js";
 export type {
   Attachment,
   Message,
