@@ -165,6 +165,71 @@ describe("didSpec.storage follows the identity kind", () => {
     const cfg = resolveConfig({ ...base, agentDid: "did:web:node:agents:fixed", didSpec: { storage: "ephemeral" } });
     expect(cfg.didSpec.storage).toBe("ephemeral");
   });
+
+  // A BORROWER is the exception to "a fixed agentDid is a durable identity".
+  // Its DID is fixed by construction — `<parent>:<segment>` — so the presence
+  // of agentDid measures nothing about how long the twin should live, and only
+  // a temporary identity may borrow a parent's authority: the node refuses a
+  // borrowing join declaring anything else with
+  // `plugin.child.storage-not-ephemeral`.
+  const PARENT = "did:web:acme.example:users:alice";
+
+  it("stays ephemeral when the caller names the borrower AND its parent", () => {
+    // The regression: `parentDid` carries no `storage` key, so it could not
+    // override the "agentDid means persistent" rule that ran before it. The
+    // join went out as "persistent" and the node refused every one of them.
+    const cfg = resolveConfig({
+      ...base,
+      agentDid: `${PARENT}:k7m2q9x4h3bd`,
+      didSpec: { parentDid: PARENT },
+    });
+    expect(cfg.didSpec.storage).toBe("ephemeral");
+    expect(cfg.didSpec.childNameSource).toBe("client");
+  });
+
+  it("stays ephemeral when only the parent is named and the SDK derives the name", () => {
+    const cfg = resolveConfig({ ...base, didSpec: { parentDid: PARENT } });
+    expect(cfg.didSpec.storage).toBe("ephemeral");
+    expect(cfg.didSpec.childNameSource).toBe("sdk");
+  });
+
+  it("keeps the three inputs apart on the wire, pairwise", () => {
+    // What the node reads is the PAIR. Storage alone cannot separate the two
+    // borrowers, and must not: both are temporary. `childNameSource` is what
+    // says who named the borrower, and "" is the third answer — no parent was
+    // named, so nobody chose a borrower's name.
+    const onWire = (cfg: ReturnType<typeof resolveConfig>) =>
+      `${cfg.didSpec.storage}/${cfg.didSpec.childNameSource}`;
+
+    const fixedOnly = onWire(
+      resolveConfig({ ...base, agentDid: "did:web:node:agents:fixed" }),
+    );
+    const parentOnly = onWire(resolveConfig({ ...base, didSpec: { parentDid: PARENT } }));
+    const both = onWire(
+      resolveConfig({
+        ...base,
+        agentDid: `${PARENT}:k7m2q9x4h3bd`,
+        didSpec: { parentDid: PARENT },
+      }),
+    );
+
+    expect(fixedOnly).toBe("persistent/");
+    expect(parentOnly).toBe("ephemeral/sdk");
+    expect(both).toBe("ephemeral/client");
+    expect(new Set([fixedOnly, parentOnly, both]).size).toBe(3);
+  });
+
+  it("still lets a caller declare persistent alongside a parent, and says so", () => {
+    // Not silently corrected: the node refuses this join and its message
+    // quotes the storage the join declared. Rewriting it here would leave the
+    // caller reading a refusal about a value it never sent.
+    const cfg = resolveConfig({
+      ...base,
+      agentDid: `${PARENT}:k7m2q9x4h3bd`,
+      didSpec: { parentDid: PARENT, storage: "persistent" },
+    });
+    expect(cfg.didSpec.storage).toBe("persistent");
+  });
 });
 
 describe("grant attachment options", () => {

@@ -50,6 +50,13 @@ export interface DidSpec {
    * `plugin.child.not-beneath-parent`. Leave `agentDid` empty and this SDK
    * generates a conforming name; see `child-did.ts` for the rule and why the
    * shape is fixed.
+   *
+   * Setting this makes the join EPHEMERAL, whether or not `agentDid` is also
+   * given: only a temporary identity may borrow authority, and the node
+   * refuses a borrowing join declaring anything else with
+   * `plugin.child.storage-not-ephemeral`. An explicit `storage` is still sent
+   * as written rather than corrected here, so the refusal a caller reads
+   * quotes the value it actually sent.
    */
   parentDid?: string;
   /**
@@ -305,9 +312,21 @@ export function resolveConfig(cfg: Config): ResolvedConfig {
   // above all — dies with it: messages sent while the agent was offline were
   // dropped at the node instead of queued. An explicit cfg.didSpec.storage
   // still wins, so a caller that wants a throwaway fixed DID can say so.
+  //
+  // A BORROWED identity is the exception, and `parentDid` is what settles it
+  // rather than `agentDid`. A borrower's DID is fixed BY CONSTRUCTION — it is
+  // `<parent>:<segment>` whether the caller wrote that name or this library
+  // derived it — so the presence of `agentDid` says nothing here about how
+  // long the twin should live. Only a temporary identity may borrow authority,
+  // and the node refuses a borrowing join declaring anything else with
+  // `plugin.child.storage-not-ephemeral`. Without this exception, passing
+  // `agentDid` and `parentDid` together — the documented way to name a
+  // borrower yourself, reported on the wire as `childNameSource: "client"` —
+  // sent `storage: "persistent"` and could never connect at all.
+  const borrowsAuthority = Boolean(cfg.didSpec?.parentDid);
   const didSpec: Required<DidSpec> = {
     ...DEFAULT_DID_SPEC,
-    ...(agentDid ? { storage: "persistent" } : {}),
+    ...(agentDid && !borrowsAuthority ? { storage: "persistent" } : {}),
     ...cfg.didSpec,
     verificationMethods:
       cfg.didSpec?.verificationMethods ?? DEFAULT_DID_SPEC.verificationMethods,

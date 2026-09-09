@@ -6,6 +6,25 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
 
 ## [Unreleased]
 
+### Fixed
+
+- **A borrower that names its own DID can connect again.** Passing `agentDid`
+  and `didSpec.parentDid` together — the way a caller supplies the whole
+  borrower DID, reported on the wire as `childNameSource: "client"` — sent
+  `storage: "persistent"`, and the node refuses every such join with
+  `plugin.child.storage-not-ephemeral`. Only a temporary identity may borrow
+  authority. The rule that a fixed `agentDid` means a persistent twin ran
+  before `didSpec` was merged and `parentDid` carries no `storage` key of its
+  own, so nothing overrode it. Naming a parent now settles the storage mode
+  instead: a borrower's DID is fixed by construction, `<parent>:<segment>`,
+  whether the caller wrote that name or this library derived it, so `agentDid`
+  measures nothing about how long the twin should live. Released 0.3.0 is
+  affected; the derived path (`parentDid` alone) was always correct.
+
+  An explicit `didSpec.storage` is still sent as written and is not corrected
+  here, so a caller that declares `persistent` alongside a parent reads a
+  refusal quoting the value it actually sent.
+
 ## [0.3.0] - 2026-09-09
 
 ### Added
