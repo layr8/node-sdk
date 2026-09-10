@@ -6,6 +6,30 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
 
 ## [Unreleased]
 
+### Changed
+
+- **`Attachment.lastmod_time` is `number | string`, not `string`.** DIDComm v2
+  defines the field, in full, as "OPTIONAL. A hint about when the content in
+  this attachment was last modified", and states no type — while pinning
+  `created_time`/`expires_time` to integer UTC epoch seconds in the same
+  document. Both DIF reference implementations carry an integer; a Layr8
+  cloud-node has been sending an ISO-8601 string. Typing the field as `string`
+  alone was a claim about the wire the wire did not owe us: a sender emitting
+  an integer would have handed callers a `number` typed as a `string`, and
+  string operations on it fail at runtime with nothing at compile time to warn
+  them.
+
+  The value is still passed through untouched, in both directions — this SDK
+  does not normalize it. `undefined` means the field was absent; anything else
+  is exactly what the peer sent. Narrow with `typeof` before use.
+
+  This widens a field callers read, so a caller that assumed `string` (e.g.
+  `att.lastmod_time?.slice(...)`) now fails to compile until it narrows. Treat
+  it as breaking when this is released.
+
+  This has to be released **before** any sender switches its default, which is
+  why it lands on its own.
+
 ### Fixed
 
 - **A borrower that names its own DID can connect again.** Passing `agentDid`

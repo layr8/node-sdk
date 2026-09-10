@@ -25,7 +25,31 @@ export interface Attachment {
   filename?: string;
   media_type?: string;
   format?: string;
-  lastmod_time?: string;
+  /**
+   * A hint about when the attached content was last modified.
+   *
+   * Two forms arrive, and the type has to admit both.
+   *
+   * DIDComm v2 defines the field, in full, as "OPTIONAL. A hint about when
+   * the content in this attachment was last modified" — and states no type
+   * for it. The same document pins `created_time` and `expires_time` to "UTC
+   * Epoch Seconds (seconds since 1970-01-01T00:00:00Z) as an integer", so the
+   * silence here is visible rather than accidental. Both DIF reference
+   * implementations (didcomm-rust, didcomm-python) carry an integer, and that
+   * is where senders are heading; a Layr8 cloud-node has historically sent an
+   * ISO-8601 string instead, and messages carrying one are already in flight.
+   *
+   * This type was `string` alone, which was a claim about the wire that the
+   * wire did not owe us: a sender emitting an integer would have handed
+   * callers a `number` typed as a `string`, and string operations on it fail
+   * at runtime with nothing at compile time to warn them. Widening it here
+   * has to ship and be released BEFORE any sender switches its default.
+   *
+   * The value is passed through exactly as received — this SDK does not
+   * normalize it — so `undefined` means the field was absent and anything
+   * else is what the peer actually sent. Narrow with `typeof` before use.
+   */
+  lastmod_time?: number | string;
   byte_count?: number;
   data: {
     jws?: unknown;
