@@ -45,8 +45,8 @@ Minor is reserved for breaking changes here, which is narrower than SemVer requi
   reaches consumers without each of them editing its range. Shipping it as a minor
   strands them.
 
-`0.3.0` is already spoken for: the `0.2.0` changelog slates `PhoenixChannel` for removal,
-and that removal is the next real breaking change.
+`PhoenixChannel` is still slated for removal — the `0.2.0` changelog says so — and that
+removal is a breaking change, so it takes a minor of its own when it lands.
 
 ## What the workflow does
 
