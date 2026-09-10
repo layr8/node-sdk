@@ -307,11 +307,21 @@ export function resolveConfig(cfg: Config): ResolvedConfig {
 
   // A FIXED identity (agentDid given) defaults to a PERSISTENT twin; only a
   // node-assigned per-session DID defaults to ephemeral. Since cloud-node
-  // 4.19.3x (2026-09-08) an ephemeral twin is reclaimed the moment it
-  // disconnects, and everything stored on the twin — its mediator declaration
-  // above all — dies with it: messages sent while the agent was offline were
+  // 4.19.3x (2026-09-08) an ephemeral twin is DELETED once its holder has been
+  // gone long enough, and everything stored on the twin — its mediator
+  // declaration above all — dies with it: messages sent after that point were
   // dropped at the node instead of queued. An explicit cfg.didSpec.storage
   // still wins, so a caller that wants a throwaway fixed DID can say so.
+  //
+  // "Long enough", not "at once", and the difference is the number an agent
+  // author needs. Disconnecting UNBINDS the twin and starts a clock; a sweep
+  // on the node deletes it at a TTL measured from the most recent disconnect,
+  // and a twin with any protocol still connected is never swept at any age.
+  // An earlier revision of this comment said "reclaimed the moment it
+  // disconnects", which reads as "you may never go offline" — the wrong
+  // design constraint, and stated more confidently than the node behaves.
+  // The node's own account is the authority: `L8Server.Twins.EphemeralTwins`,
+  // under "Age is measured from disconnect, never from creation".
   //
   // A BORROWED identity is the exception, and `parentDid` is what settles it
   // rather than `agentDid`. A borrower's DID is fixed BY CONSTRUCTION — it is
