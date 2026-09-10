@@ -539,6 +539,44 @@ export class Layr8Client extends EventEmitter {
    * caller learns which from `delegatedCredentials()`. The wallet is not the
    * place to record why something is missing.
    */
+  /**
+   * What the last join learned about the parent's wallet, and what came back.
+   *
+   * Read this together with `supportsEphemeralDelegation()`. On its own the
+   * `undefined` here is two facts:
+   *
+   * | this method | `supportsEphemeralDelegation()` | meaning |
+   * |---|---|---|
+   * | `undefined` | `true` | the join named no parent, or the node looked and sent nothing |
+   * | `undefined` | `false` | the node never looked — it does not do this at all |
+   * | `{status: "complete", credentials: []}` | `true` | the parent's wallet was **read** and grants nothing |
+   * | `{status: "complete", credentials: [...]}` | `true` | read, and here is all of it |
+   * | `{status: "partial", credentials: [...]}` | `true` | read, and some of it could not be delegated |
+   * | `{status: "unread", credentials: []}` | `true` | the wallet could **not** be read; the `[]` measures nothing |
+   *
+   * Collapsing any pair of those reports something nobody measured.
+   *
+   * Reads the primary Channel — the identity `connect()` joined. A DID hosted
+   * through `joinDid()` carries its own reading; that Channel is the handle's,
+   * not this one's. `undefined` before `connect()` resolves.
+   */
+  delegatedCredentials(): DelegatedCredentialsReading | undefined {
+    return this.primaryChannel?.delegatedCredentials();
+  }
+
+  /**
+   * Whether the node advertised `ephemeral_delegation/1` at the primary join.
+   *
+   * This is the half that makes `delegatedCredentials()` readable: without it,
+   * an absent reading means the node never looked, not that the parent holds
+   * nothing. `false` before `connect()` resolves, and `false` from a node that
+   * does not do delegation — those two are the same value on purpose, because
+   * in both the answer to "did anything look" is no.
+   */
+  supportsEphemeralDelegation(): boolean {
+    return this.primaryChannel?.supportsEphemeralDelegation() ?? false;
+  }
+
   private applyDelegated(
     did: string,
     reading: DelegatedCredentialsReading | undefined,

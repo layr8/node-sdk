@@ -657,12 +657,31 @@ A refused join names its reason: `plugin.parent.not-persistent`,
 `plugin.child.not-beneath-parent`, `plugin.child.storage-not-ephemeral`. This
 SDK does not swallow or rewrite the node's reason.
 
-**Reading what came back.** `Channel.delegatedCredentials()` returns a reading,
+**Reading what came back.** `client.delegatedCredentials()` returns a reading,
 not a list — `undefined`, or a `status` of `complete`, `partial` or `unread`
 alongside the credentials. `unread` with an empty list is the wallet failing to
 be read, not a wallet that grants nothing, so read `status` before
 `credentials`: `?.credentials ?? []` collapses those into one answer nobody
 measured.
+
+Read it beside `client.supportsEphemeralDelegation()`, which is what makes an
+`undefined` legible: with it `true`, the join named no parent or the node sent
+nothing back; with it `false`, the node does not do delegation and never
+looked. Those are different facts about different things.
+
+```ts
+const reading = client.delegatedCredentials();
+
+if (!reading) {
+  if (!client.supportsEphemeralDelegation()) {
+    // This node never looked. Nothing here is a statement about the parent.
+  }
+} else if (reading.status === "unread") {
+  // The parent's wallet could not be read. `reading.credentials` measures nothing.
+} else {
+  // `complete` or `partial` — `reading.credentials` is what the node signed.
+}
+```
 
 ### Connection Resilience
 
