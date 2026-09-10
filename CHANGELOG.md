@@ -6,6 +6,8 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-10
+
 ### Changed
 
 - **`Attachment.lastmod_time` is `number | string`, not `string`.** DIDComm v2
@@ -24,11 +26,11 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
   is exactly what the peer sent. Narrow with `typeof` before use.
 
   This widens a field callers read, so a caller that assumed `string` (e.g.
-  `att.lastmod_time?.slice(...)`) now fails to compile until it narrows. Treat
-  it as breaking when this is released.
+  `att.lastmod_time?.slice(...)`) now fails to compile until it narrows. That
+  is the breaking change this minor bump is for.
 
-  This has to be released **before** any sender switches its default, which is
-  why it lands on its own.
+  This release has to reach callers **before** any sender starts emitting an
+  integer, which is why it lands on its own.
 
 ### Fixed
 
@@ -396,6 +398,7 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
 - 16 new tests under `tests/multi-did.test.ts` covering `joinDid` lifecycle (before connect, duplicate DID, primary-DID rejection, `leaveDid`, close-tears-down-all), inbound routing by topic (per-DID first, fallback to client-global, override priority, unrelated topic drops), `DidHandle.send` (writes to its own topic, stamps `from`), and three reconnect scenarios (rejoin every Channel after WS drops, isolated rejoin failure in multi-DID, single-DID rejoin failure retries the backoff loop).
 - 3 small test-bug fixes in `tests/client.test.ts` where the wrong topic literal (`plugin:lobby`, singular and incorrect) was masked by the old monolith's lack of topic routing. Updated to `plugins:<agentDid>` to match production.
 
+[0.4.0]: https://github.com/layr8/node-sdk/releases/tag/v0.4.0
 [0.3.0]: https://github.com/layr8/node-sdk/releases/tag/v0.3.0
 [0.2.7]: https://github.com/layr8/node-sdk/releases/tag/v0.2.7
 [0.2.6]: https://github.com/layr8/node-sdk/releases/tag/v0.2.6

@@ -90,6 +90,56 @@ Decode the body of an inbound message with `unmarshalBody`:
 const req = unmarshalBody<MyRequest>(msg as any);
 ```
 
+#### Attachments
+
+An inbound message may carry `attachments`. Everything on one is optional
+except `data`:
+
+```typescript
+interface Attachment {
+  id?: string;
+  description?: string;
+  filename?: string;
+  media_type?: string;
+  format?: string;
+  lastmod_time?: number | string;   // see below
+  byte_count?: number;
+  data: {
+    jws?: unknown;
+    hash?: string;
+    links?: string[];
+    base64?: string;
+    json?: unknown;
+  };
+}
+```
+
+**`lastmod_time` is `number | string`, and 0.4.0 is where it widened from
+`string`.** DIDComm v2 pins `created_time` and `expires_time` to integer UTC
+epoch seconds, and states no type at all for this field — only that it is "a
+hint about when the content in this attachment was last modified". Both DIF
+reference implementations carry an integer; a Layr8 cloud-node has been
+sending an ISO-8601 string. This SDK passes the value through exactly as it
+arrived, in both directions, and does not normalize it.
+
+**What a caller upgrading from 0.3.x has to change.** Code that treated the
+value as a string stops compiling. Narrow before you use it:
+
+```typescript
+const t = att.lastmod_time;
+if (typeof t === "number") {
+  // UTC epoch seconds
+} else if (typeof t === "string") {
+  // an ISO-8601 timestamp, which is what older Layr8 senders emit
+} else {
+  // undefined — the field was absent
+}
+```
+
+`undefined` means the field was absent. There is no separate "present but
+unreadable" value, because this SDK never parses it: whatever the peer put on
+the wire is what you get.
+
 ### Handlers
 
 Handlers process inbound messages. Register them with `client.handle()` before calling `connect()`.
@@ -565,6 +615,54 @@ await client.connect();
 
 console.log(client.did); // "did:web:myorg:my-agent"
 ```
+
+### Borrowing a parent's authority
+
+A join can name the identity whose authority its DID borrows. Set
+`didSpec.parentDid`, leave `agentDid` empty, and the client joins as
+`<parentDid>:<segment>` — twelve characters of Crockford base32, generated once
+when the configuration is resolved, so a reconnect returns under the same DID.
+
+```typescript
+const client = new Layr8Client(logErrors(), {
+  nodeUrl: "wss://node.example.com/plugin_socket/websocket",
+  apiKey: "my-key",
+  didSpec: { parentDid: "did:web:acme.example:users:alice" },
+});
+await client.connect();
+
+console.log(client.did); // "did:web:acme.example:users:alice:9m2q4x7t1k0b"
+```
+
+The node signs one credential for this DID per grant the parent holds and
+returns them in the join reply. There is nothing to select — everything the
+parent holds is delegated — and with `attachGrants` on (the default) they ride
+outbound messages automatically.
+
+**The DID must be named beneath its parent**, exactly one further segment. You
+may name it yourself by passing `agentDid` and `parentDid` together; one that
+is not beneath the parent throws a `Layr8Error` while the config is resolved,
+rather than travelling to the node and coming back as a join refusal.
+`didNamespaceOf(parent)` returns the single API-key entry that admits every DID
+which may borrow from that parent.
+
+**Only a temporary identity may borrow.** Naming a parent makes the join
+ephemeral even though the DID is fixed, so do not also set
+`didSpec.storage: "persistent"` — an explicit value is sent as written, and the
+node refuses that join. The parent itself must be a persistent identity hosted
+by that node.
+
+A refused join names its reason: `plugin.parent.not-persistent`,
+`plugin.parent.not-found`, `plugin.parent.not-hosted-here`,
+`plugin.child.not-beneath-parent`, `plugin.child.storage-not-ephemeral`. This
+SDK does not swallow or rewrite the node's reason.
+
+**Reading what came back.** `Channel.delegatedCredentials()` returns a reading,
+not a list — `undefined`, or a `status` of `complete`, `partial` or `unread`
+alongside the credentials. `unread` with an empty list is the wallet failing to
+be read, not a wallet that grants nothing, so read `status` before
+`credentials`: `?.credentials ?? []` collapses those into one answer nobody
+measured.
 
 ### Connection Resilience
 
