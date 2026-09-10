@@ -6,6 +6,23 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-09-10
+
+### Added
+
+- **`Layr8Client.delegatedCredentials()` and
+  `Layr8Client.supportsEphemeralDelegation()`.** The reading a join returns
+  about a borrowed identity's inherited grants has been on `Channel` since the
+  feature shipped — and `Channel` is not exported, so the entry every example
+  in this README uses could not reach it. The Go, Python and Elixir SDKs all
+  expose it on their client; this was the only one of the four that did not,
+  while this package's own source comments referred to the method by name.
+
+  Both, not one: on its own an `undefined` reading is two facts, and
+  `supportsEphemeralDelegation()` is what separates "the node looked and sent
+  nothing" from "this node never looked". They read the primary Channel — a
+  DID hosted through `joinDid()` carries its own.
+
 ## [0.4.0] - 2026-09-10
 
 ### Changed
