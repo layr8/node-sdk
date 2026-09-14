@@ -19,6 +19,11 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
   body that is not a JSON object rejects the same way. The Python, Go and
   Elixir SDKs already refused such a reply.
 
+  An `error` object without a numeric `code` and a string `message` is
+  treated the same way — rejected as a malformed JSON-RPC error (`-32603`)
+  instead of being reported as a peer error with an invented code and an
+  empty message.
+
   A `result` of `null` is still a result and resolves to `null`. A
   well-formed JSON-RPC response behaves exactly as before, so this is a patch:
   the only calls whose outcome changes are the ones that were returning an

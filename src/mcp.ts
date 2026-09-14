@@ -95,10 +95,17 @@ export class McpPeer {
     }
     const body = raw as {
       result?: T;
-      error?: { code?: number; message?: string; data?: unknown };
+      error?: { code?: unknown; message?: unknown; data?: unknown };
     };
     if (body.error !== null && typeof body.error === "object") {
-      throw new McpError(body.error.code ?? -32603, body.error.message ?? "", body.error.data);
+      const { code, message, data } = body.error;
+      if (typeof code !== "number" || typeof message !== "string") {
+        // An error object without a numeric code and a string message is not a
+        // JSON-RPC error; inventing -32603 and an empty message would state a
+        // failure the peer did not report.
+        throw new McpError(-32603, `peer returned a malformed JSON-RPC error: ${JSON.stringify(body)}`);
+      }
+      throw new McpError(code, message, data);
     }
     if (!("result" in body)) {
       // A reply with neither `result` nor `error` is not a JSON-RPC response.

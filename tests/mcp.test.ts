@@ -161,6 +161,20 @@ describe("client.mcp()", () => {
     await client.close();
   });
 
+  it("rejects an error object without a numeric code and a string message as malformed", async () => {
+    const wsUrl = await mcpServer(() => ({}), (rpc) => ({ jsonrpc: "2.0", id: rpc.id, error: { message: 42 } }));
+    const client = new Layr8Client(discardErrors, { nodeUrl: wsUrl, apiKey: "k", agentDid: MY });
+    const mcp = client.mcp();
+    await client.connect();
+
+    await expect(mcp.peer(PEER).call("tools/list")).rejects.toMatchObject({
+      name: "McpError",
+      code: -32603,
+      message: expect.stringContaining("malformed JSON-RPC error"),
+    });
+    await client.close();
+  });
+
   it("a null result is a result, not an unreadable reply", async () => {
     const wsUrl = await mcpServer(() => ({ result: null }));
     const client = new Layr8Client(discardErrors, { nodeUrl: wsUrl, apiKey: "k", agentDid: MY });
