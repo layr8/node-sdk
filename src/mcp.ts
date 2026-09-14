@@ -89,12 +89,30 @@ export class McpPeer {
       opts?.signal ? { signal: opts.signal } : undefined,
     );
 
-    const body = ((reply as { bodyRaw?: unknown }).bodyRaw ?? reply.body ?? {}) as {
+    const raw = (reply as { bodyRaw?: unknown }).bodyRaw ?? reply.body;
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+      throw new McpError(-32603, `peer returned a non-JSON-RPC body: ${JSON.stringify(raw ?? null)}`);
+    }
+    const body = raw as {
       result?: T;
-      error?: { code: number; message: string; data?: unknown };
+      error?: { code?: unknown; message?: unknown; data?: unknown };
     };
-    if (body.error) {
-      throw new McpError(body.error.code, body.error.message, body.error.data);
+    if (body.error !== null && typeof body.error === "object") {
+      const { code, message, data } = body.error;
+      if (typeof code !== "number" || typeof message !== "string") {
+        // An error object without a numeric code and a string message is not a
+        // JSON-RPC error; inventing -32603 and an empty message would state a
+        // failure the peer did not report.
+        throw new McpError(-32603, `peer returned a malformed JSON-RPC error: ${JSON.stringify(body)}`);
+      }
+      throw new McpError(code, message, data);
+    }
+    if (!("result" in body)) {
+      // A reply with neither `result` nor `error` is not a JSON-RPC response.
+      // Returning `undefined` would read as a peer that answered with nothing,
+      // which is a success value nobody measured. The Python, Go and Elixir
+      // SDKs refuse the same reply.
+      throw new McpError(-32603, `peer returned neither result nor error: ${JSON.stringify(body)}`);
     }
     return body.result as T;
   }
