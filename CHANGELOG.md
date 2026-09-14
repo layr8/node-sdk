@@ -6,6 +6,24 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-09-14
+
+### Fixed
+
+- **`McpPeer.call()` no longer returns `undefined` for a reply it cannot
+  read.** A reply body with neither `result` nor `error` — for example a
+  server that answers with a bare `CallToolResult` and no JSON-RPC envelope —
+  used to resolve `call()`, `callTool()` and `initialize()` to `undefined`,
+  which reads as a successful call with an empty answer. It now rejects with
+  `McpError` code `-32603` ("peer returned neither result nor error"), and a
+  body that is not a JSON object rejects the same way. The Python, Go and
+  Elixir SDKs already refused such a reply.
+
+  A `result` of `null` is still a result and resolves to `null`. A
+  well-formed JSON-RPC response behaves exactly as before, so this is a patch:
+  the only calls whose outcome changes are the ones that were returning an
+  answer nobody read.
+
 ## [0.4.1] - 2026-09-10
 
 ### Added

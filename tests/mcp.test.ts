@@ -57,7 +57,11 @@ let server: MockPhoenixServer;
  * a `${BASE}/<method>-result` DIDComm message echoing the outbound `thid` and
  * a JSON-RPC body produced by `respond(outboundJsonRpc)`.
  */
-async function mcpServer(respond: (rpc: any) => { result?: unknown; error?: unknown }): Promise<string> {
+async function mcpServer(
+  respond: (rpc: any) => { result?: unknown; error?: unknown },
+  /** Replace the whole reply body, bypassing the JSON-RPC envelope. */
+  rawBody?: (rpc: any) => unknown,
+): Promise<string> {
   server = new MockPhoenixServer();
   const wsUrl = await server.ready();
   server.onMsg = (msg) => {
@@ -77,7 +81,7 @@ async function mcpServer(respond: (rpc: any) => { result?: unknown; error?: unkn
           from: PEER,
           to: [out.from],
           thid: out.thid,
-          body: { jsonrpc: "2.0", id: out.body.id, ...rpc },
+          body: rawBody ? rawBody(out.body) : { jsonrpc: "2.0", id: out.body.id, ...rpc },
         },
       });
     }
@@ -134,6 +138,36 @@ describe("client.mcp()", () => {
       code: -32001,
       message: "not authorized",
     });
+    await client.close();
+  });
+
+  // A server that answers with a bare CallToolResult (no JSON-RPC envelope)
+  // used to make callTool() resolve to `undefined`: a reply nobody read,
+  // returned as a successful empty answer.
+  it("rejects a reply that is neither result nor error instead of returning undefined", async () => {
+    const wsUrl = await mcpServer(
+      () => ({}),
+      () => ({ content: [{ type: "text", text: "a bare CallToolResult, no envelope" }] }),
+    );
+    const client = new Layr8Client(discardErrors, { nodeUrl: wsUrl, apiKey: "k", agentDid: MY });
+    const mcp = client.mcp();
+    await client.connect();
+
+    await expect(mcp.peer(PEER).callTool("search_emails", {})).rejects.toMatchObject({
+      name: "McpError",
+      code: -32603,
+      message: expect.stringContaining("neither result nor error"),
+    });
+    await client.close();
+  });
+
+  it("a null result is a result, not an unreadable reply", async () => {
+    const wsUrl = await mcpServer(() => ({ result: null }));
+    const client = new Layr8Client(discardErrors, { nodeUrl: wsUrl, apiKey: "k", agentDid: MY });
+    const mcp = client.mcp();
+    await client.connect();
+
+    await expect(mcp.peer(PEER).call("tools/call", { name: "x" })).resolves.toBeNull();
     await client.close();
   });
 
