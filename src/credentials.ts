@@ -2,20 +2,63 @@
  * W3C Verifiable Credential types and option interfaces.
  */
 
+import { v4 as uuidv4 } from "uuid";
 import type { RestRequestOptions } from "./rest.js";
 
 /** CredentialFormat controls the signed credential output encoding. */
 export type CredentialFormat = "compact_jwt" | "json" | "jwt" | "enveloped";
 
-/** A W3C Verifiable Credential for signing. */
+/**
+ * A W3C Verifiable Credential for signing.
+ *
+ * The node refuses to sign a credential that has no `id` or no `issuer` key
+ * (HTTP 422 "Invalid credential: missing required fields", without saying
+ * which). Both stay optional here because `signCredential` fills them in
+ * before sending; see the two fields below.
+ */
 export interface Credential {
   "@context"?: string[];
+  /**
+   * Credential identifier. When omitted (or empty), `signCredential` sends a
+   * freshly generated `urn:uuid:<UUID v4>`. A value you give is sent as is.
+   */
   id?: string;
   type?: string[];
+  /**
+   * Issuer DID. When omitted (or empty), `signCredential` sends the DID it
+   * signs with: `options.issuerDid`, else `client.did`. A value you give is
+   * sent as is — the SDK does not check it against the signing DID.
+   */
   issuer?: string;
   credentialSubject: Record<string, unknown>;
   validFrom?: string;
   validUntil?: string;
+}
+
+/**
+ * Returns a copy of `credential` carrying the two keys the node's
+ * `/api/v1/credentials/sign` requires: `issuer` (set to `issuerDid`) and `id`
+ * (a new `urn:uuid:<UUID v4>`), each only when absent, `null`, or empty.
+ * A present value is never replaced and the input object is never modified.
+ *
+ * Internal to the SDK — not re-exported from the package entry point.
+ */
+export function withRequiredCredentialFields(
+  credential: Credential,
+  issuerDid: string,
+): Credential {
+  const filled: Credential = { ...credential };
+  if (isMissing(filled.issuer)) {
+    filled.issuer = issuerDid;
+  }
+  if (isMissing(filled.id)) {
+    filled.id = `urn:uuid:${uuidv4()}`;
+  }
+  return filled;
+}
+
+function isMissing(value: unknown): boolean {
+  return value === undefined || value === null || value === "";
 }
 
 /** Returned by verifyCredential — the decoded credential and JWT headers. */

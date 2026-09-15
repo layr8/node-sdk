@@ -102,6 +102,111 @@ describe("signCredential", () => {
   });
 });
 
+// The node's /api/v1/credentials/sign requires `id` and `issuer` keys on the
+// credential and answers 422 "Invalid credential: missing required fields"
+// without naming which one is missing. The SDK fills both in before sending.
+describe("signCredential fills the credential fields the node requires", () => {
+  const URN_UUID = /^urn:uuid:[0-9a-f-]{36}$/;
+
+  /** Sign `cred` against a mock node and return the request body it received. */
+  async function sentBody(
+    cred: Credential,
+    options?: Parameters<Layr8Client["signCredential"]>[1],
+  ): Promise<Record<string, any>> {
+    let captured: Record<string, any> | undefined;
+    const { url, server } = await startMockServer(async (req, res) => {
+      captured = await readBody(req);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ signed_credential: "eyJ.sig" }));
+    });
+    activeServer = server;
+    await newTestClient(url).signCredential(cred, options);
+    if (!captured) throw new Error("mock node received no request body");
+    return captured;
+  }
+
+  it("fills issuer with the agent DID and a urn:uuid id when both are missing", async () => {
+    const cred: Credential = { credentialSubject: { id: "holder" } };
+    const snapshot = structuredClone(cred);
+
+    const body = await sentBody(cred);
+
+    expect(body.credential.issuer).toBe(TEST_AGENT_DID);
+    expect(body.credential.id).toMatch(URN_UUID);
+    expect(body.credential.credentialSubject).toEqual({ id: "holder" });
+    expect(body.issuer_did).toBe(TEST_AGENT_DID);
+    expect(cred).toEqual(snapshot);
+    expect("id" in cred).toBe(false);
+    expect("issuer" in cred).toBe(false);
+  });
+
+  it("keeps a given id and fills only issuer", async () => {
+    const cred: Credential = { id: "urn:uuid:caller-chosen", credentialSubject: { a: 1 } };
+    const snapshot = structuredClone(cred);
+
+    const body = await sentBody(cred);
+
+    expect(body.credential.id).toBe("urn:uuid:caller-chosen");
+    expect(body.credential.issuer).toBe(TEST_AGENT_DID);
+    expect(cred).toEqual(snapshot);
+  });
+
+  it("keeps a given issuer and fills only id", async () => {
+    const cred: Credential = { issuer: "did:web:given.localhost:issuer", credentialSubject: { a: 1 } };
+    const snapshot = structuredClone(cred);
+
+    const body = await sentBody(cred);
+
+    expect(body.credential.issuer).toBe("did:web:given.localhost:issuer");
+    expect(body.credential.id).toMatch(URN_UUID);
+    expect(cred).toEqual(snapshot);
+  });
+
+  it("sends a credential that has both fields exactly as given", async () => {
+    const cred: Credential = {
+      id: "urn:uuid:caller-chosen",
+      issuer: "did:web:given.localhost:issuer",
+      credentialSubject: { a: 1 },
+    };
+    const snapshot = structuredClone(cred);
+
+    const body = await sentBody(cred);
+
+    expect(body.credential).toEqual(snapshot);
+    expect(cred).toEqual(snapshot);
+  });
+
+  it("fills issuer with options.issuerDid, not the agent DID, when one is given", async () => {
+    const body = await sentBody(
+      { credentialSubject: { a: 1 } },
+      { issuerDid: "did:web:other.localhost:other-agent" },
+    );
+
+    expect(body.credential.issuer).toBe("did:web:other.localhost:other-agent");
+    expect(body.issuer_did).toBe("did:web:other.localhost:other-agent");
+  });
+
+  it("treats empty-string id and issuer as missing", async () => {
+    const cred: Credential = { id: "", issuer: "", credentialSubject: { a: 1 } };
+
+    const body = await sentBody(cred);
+
+    expect(body.credential.issuer).toBe(TEST_AGENT_DID);
+    expect(body.credential.id).toMatch(URN_UUID);
+    expect(cred.id).toBe("");
+    expect(cred.issuer).toBe("");
+  });
+
+  it("generates a different id for each call", async () => {
+    const cred: Credential = { credentialSubject: { a: 1 } };
+    const first = await sentBody(cred);
+    activeServer?.close();
+    const second = await sentBody(cred);
+
+    expect(first.credential.id).not.toBe(second.credential.id);
+  });
+});
+
 describe("verifyCredential", () => {
   it("sends correct request and returns verified credential", async () => {
     const { url, server } = await startMockServer(async (req, res) => {

@@ -890,6 +890,18 @@ const signedJWT = await client.signCredential(cred);
 
 Options: `{ issuerDid, format }`.
 
+`id` and `issuer` may be left out. The node refuses a credential without
+either (HTTP 422, without saying which), so when one is missing or empty
+`signCredential` sends `issuer` as the DID it signs with (`issuerDid`, else
+`client.did`) and `id` as a new `urn:uuid:<UUID v4>`. Values you give are sent
+unchanged, and the object you pass is not modified.
+
+```typescript
+const signedJWT = await client.signCredential({
+  credentialSubject: { id: "did:web:example:holder", name: "Alice" },
+});
+```
+
 ### Verify a Credential
 
 ```typescript
