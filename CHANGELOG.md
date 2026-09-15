@@ -6,6 +6,20 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
 
 ## [Unreleased]
 
+### Fixed
+
+- **`signCredential()` fills in `id` and `issuer` when the credential leaves
+  them out.** The node's `/api/v1/credentials/sign` requires both keys and
+  answers `422 "Invalid credential: missing required fields"` without naming
+  the missing one, while the `Credential` type declares both optional — so a
+  credential with only `credentialSubject` type-checked and then failed on
+  the wire. When either is absent, `null` or empty, the SDK now sends `issuer`
+  as the signing DID (`options.issuerDid`, else `client.did` — the same value
+  it sends as `issuer_did`) and `id` as a new `urn:uuid:<UUID v4>`. A value
+  the caller gives is sent unchanged, and the caller's object is not modified.
+  The fields stay optional in the type. The Go, Python and Elixir SDKs make
+  the same change.
+
 ## [0.4.2] - 2026-09-14
 
 ### Fixed

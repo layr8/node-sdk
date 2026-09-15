@@ -12,6 +12,7 @@ import type {
   ListCredentialsOptions,
   GetCredentialOptions,
 } from "./credentials.js";
+import { withRequiredCredentialFields } from "./credentials.js";
 import type {
   SignPresentationOptions,
   VerifiedPresentation,
@@ -683,14 +684,21 @@ export class Layr8Client extends EventEmitter {
   /**
    * Sign a W3C Verifiable Credential using the issuer's assertion key.
    * Defaults: issuer = client.did, format = "compact_jwt".
+   *
+   * The node requires `id` and `issuer` on the credential and answers 422
+   * without naming the missing one, so this method fills them in when they
+   * are absent or empty: `issuer` becomes the signing DID (the `issuer_did`
+   * sent alongside), `id` becomes `urn:uuid:<UUID v4>`. Values the caller
+   * gives are never replaced, and the caller's object is not modified.
    */
   async signCredential(
     credential: Credential,
     options?: SignCredentialOptions,
   ): Promise<string> {
+    const issuerDid = options?.issuerDid ?? this.agentDid;
     const body: Record<string, unknown> = {
-      credential,
-      issuer_did: options?.issuerDid ?? this.agentDid,
+      credential: withRequiredCredentialFields(credential, issuerDid),
+      issuer_did: issuerDid,
       format: options?.format ?? "compact_jwt",
     };
 
