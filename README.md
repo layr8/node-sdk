@@ -683,6 +683,34 @@ if (!reading) {
 }
 ```
 
+**Staying current while connected.** On a join that names a `parentDid`, the
+SDK also asks the node to keep the set current (`delegation_refresh: true`). A
+node that does so announces it, and `client.supportsEphemeralDelegationRefresh()`
+returns `true`. When the parent's grants change, the node pushes the whole new
+set. The SDK replaces what it holds for that DID — the reading, and the
+credentials it attaches — and emits `delegation`:
+
+```ts
+client.on("delegation", (did: string, reading: DelegatedCredentialsReading) => {
+  // `reading` is what `delegatedCredentials()` (or the DidHandle's) now returns.
+});
+```
+
+- A push replaces the set; it never adds to it. `complete` with `[]` means the
+  parent now holds nothing this node can delegate.
+- No push means the last reading still stands. It never means "empty". The
+  node sends nothing when it cannot read the parent's wallet.
+- A push older than the one already applied, or one that is not a well-formed
+  reading, is ignored.
+- A message already choosing its attachments when a push arrives goes out with
+  the old set or the new one, never a mix.
+- With `supportsEphemeralDelegationRefresh()` `false`, the join reply is the
+  only reading the connection gets; reconnect to see a change.
+
+A DID joined with `joinDid` is kept current the same way. Its
+`DidHandle.delegatedCredentials()`, `supportsEphemeralDelegation()` and
+`supportsEphemeralDelegationRefresh()` read that DID's own join.
+
 ### Connection Resilience
 
 The SDK automatically reconnects when the WebSocket connection drops (e.g., node restart, network interruption). Reconnection uses exponential backoff starting at 1 second, capped at 30 seconds.
