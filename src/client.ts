@@ -1170,6 +1170,11 @@ export class Layr8Client extends EventEmitter {
       if (!filled.threadId) {
         filled.threadId = original.threadId || original.id;
       }
+      // The reply joins the request's trace: the request's trace context is
+      // copied unchanged unless the handler set its own.
+      if (!filled.traceContext && original.traceContext) {
+        filled.traceContext = original.traceContext;
+      }
       const internal = await this.withGrants(filled);
       await this.ordered(channel, () => this.sendMessageOnChannel(internal, channel));
     } catch (err) {
@@ -1213,6 +1218,7 @@ export class Layr8Client extends EventEmitter {
         to: original.from ? [original.from] : [],
         threadId,
         parentThreadId: "",
+        ...(original.traceContext ? { traceContext: original.traceContext } : {}),
         body: {
           code: "e.p.xfer.cant-process",
           comment: err.message,
@@ -1235,6 +1241,7 @@ export class Layr8Client extends EventEmitter {
       parentThreadId: msg.parentThreadId || "",
       body: msg.body ?? null,
       ...(msg.attachments ? { attachments: msg.attachments } : {}),
+      ...(msg.traceContext ? { traceContext: msg.traceContext } : {}),
     };
   }
 

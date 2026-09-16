@@ -572,6 +572,114 @@ describe("Layr8Client", () => {
     await client.close();
   });
 
+  // Contract: the DIDComm `trace_context` header. A responder copies the
+  // request's value unchanged into its reply and into the problem report for
+  // a failed handler, so the node can keep both in the request's trace.
+  describe("trace_context on replies", () => {
+    const TC = {
+      traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00",
+      tracestate: "vendor=value",
+    };
+
+    async function runHandler(
+      handler: (msg: Message) => Promise<Message | null>,
+      replyType: string,
+      header: Record<string, unknown> = { trace_context: TC },
+    ): Promise<Record<string, unknown>[]> {
+      await setupServer();
+      const client = new Layr8Client(discardErrors, {
+        nodeUrl: wsUrl,
+        apiKey: "test-key",
+        agentDid: "did:web:alice",
+      });
+      client.handle("https://layr8.io/protocols/echo/1.0/request", handler);
+      await client.connect();
+      server.sendToClient(null, null, "plugins:did:web:alice", "message", {
+        plaintext: {
+          id: "req-1",
+          type: "https://layr8.io/protocols/echo/1.0/request",
+          from: "did:web:bob",
+          to: ["did:web:alice"],
+          thid: "thread-abc",
+          body: {},
+          ...header,
+        },
+      });
+      await delay(500);
+      const out = server
+        .getReceived()
+        .filter((r) => r.event === "message")
+        .map((r) => r.payload as Record<string, unknown>)
+        .filter((p) => p.type === replyType);
+      await client.close();
+      return out;
+    }
+
+    const reply = (extra: Partial<Message> = {}) => async (): Promise<Message> => ({
+      id: "",
+      type: "https://layr8.io/protocols/echo/1.0/response",
+      from: "",
+      to: [],
+      threadId: "",
+      parentThreadId: "",
+      body: { echo: "pong" },
+      ...extra,
+    });
+
+    it("the handler sees the request's trace context", async () => {
+      let seen: unknown;
+      await runHandler(async (msg) => {
+        seen = msg.traceContext;
+        return null;
+      }, "none");
+      expect(seen).toEqual(TC);
+    });
+
+    it("an auto-filled reply copies the request's trace context unchanged", async () => {
+      const out = await runHandler(reply(), "https://layr8.io/protocols/echo/1.0/response");
+      expect(out.length).toBe(1);
+      expect(out[0].trace_context).toEqual(TC);
+      expect(out[0].thid).toBe("thread-abc");
+    });
+
+    it("a reply that sets its own trace context keeps it", async () => {
+      const own = { traceparent: "00-11111111111111111111111111111111-2222222222222222-00" };
+      const out = await runHandler(
+        reply({ traceContext: own }),
+        "https://layr8.io/protocols/echo/1.0/response",
+      );
+      expect(out[0].trace_context).toEqual(own);
+    });
+
+    it("a handler-error problem report copies the request's trace context", async () => {
+      const out = await runHandler(async () => {
+        throw new Error("boom");
+      }, "https://didcomm.org/report-problem/2.0/problem-report");
+      expect(out.length).toBe(1);
+      expect(out[0].trace_context).toEqual(TC);
+    });
+
+    it("a request without trace context gives a reply without one", async () => {
+      const out = await runHandler(
+        reply(),
+        "https://layr8.io/protocols/echo/1.0/response",
+        {},
+      );
+      expect(out.length).toBe(1);
+      expect("trace_context" in out[0]).toBe(false);
+    });
+
+    it("a malformed trace context is not an error and is not copied", async () => {
+      const out = await runHandler(
+        reply(),
+        "https://layr8.io/protocols/echo/1.0/response",
+        { trace_context: "00-not-an-object" },
+      );
+      expect(out.length).toBe(1);
+      expect("trace_context" in out[0]).toBe(false);
+    });
+  });
+
   it("includes server reason in join rejection error", async () => {
     await setupServer();
 
