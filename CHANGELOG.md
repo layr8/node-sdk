@@ -16,7 +16,11 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
   that DID in one step, ignores a push whose `revision` is not newer than the
   one it holds, ignores a push that does not parse (and an `unread` push, which
   the node never sends), and emits `delegation` `(did, reading)`. A rejoin
-  starts the revision again from the join reply.
+  starts the revision again from the join reply. A push that arrives right
+  behind a join reply (even in the same socket read) is held until that join
+  has installed its reading, then applied, so it is neither dropped nor
+  overwritten by the older join reading. A `revision` must be a JSON integer
+  literal: `1.0` is rejected, as the Go, Python and Elixir SDKs reject it.
 - `client.supportsEphemeralDelegationRefresh()`, and on `DidHandle`:
   `delegatedCredentials()`, `supportsEphemeralDelegation()` and
   `supportsEphemeralDelegationRefresh()`. `DELEGATION_REFRESH_CAPABILITY` is

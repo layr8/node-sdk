@@ -28,6 +28,9 @@ export type { ServerReply };
  *   something to hand over leaves the last join's credentials in the wallet
  *   while `delegatedCredentials()` reports there are none: two answers to one
  *   question, and the wallet's is the one that reaches the wire.
+ *   It also fires for every APPLIED push (see `onDelegationRefreshed`), after
+ *   the join that push follows has fired it, so it always carries the reading
+ *   `delegatedCredentials()` returns at that moment.
  */
 export interface ChannelCallbacks {
   onMessage: (payload: unknown) => void;
@@ -136,8 +139,12 @@ export const DELEGATION_REFRESH_CAPABILITY = "ephemeral_delegation_refresh/1";
  * The payload is the join reply's reading plus `revision`, so it goes through
  * the same parser. On top of that:
  *
- * - `revision` must be a non-negative integer. Without it a consumer cannot
- *   tell a late push from a new one, so a push without it is not applied.
+ * - `revision` must be a non-negative JSON integer literal. Without it a
+ *   consumer cannot tell a late push from a new one, so a push without it is
+ *   not applied. `JSON.parse` turns `1.0` into `1`, so the parsed number alone
+ *   cannot tell them apart: pass `revisionSource`, the literal as it appeared
+ *   on the wire (see `delegationRevisionSource` in connection.ts), and `1.0` or `1e0` is
+ *   rejected as the other SDKs reject it. The connection always passes it.
  * - `status: "unread"` is never pushed by the node: a refresh whose read
  *   failed sends nothing, and the last reading stands. A push that says
  *   `unread` anyway is dropped rather than applied, because applying it would
@@ -146,11 +153,15 @@ export const DELEGATION_REFRESH_CAPABILITY = "ephemeral_delegation_refresh/1";
  */
 export function parseDelegationPush(
   raw: unknown,
+  revisionSource?: string,
 ): { reading: DelegatedCredentialsReading; revision: number } | undefined {
   const reading = parseDelegatedCredentials(raw);
   if (!reading || reading.status === "unread") return undefined;
   const revision = (raw as { revision?: unknown }).revision;
   if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0) {
+    return undefined;
+  }
+  if (revisionSource !== undefined && !/^(0|[1-9][0-9]*)$/.test(revisionSource)) {
     return undefined;
   }
   return { reading, revision };
@@ -216,6 +227,18 @@ export class Channel {
   private delegationRefreshRequested = false;
   /** Revision of the reading `delegatedVal` holds; reset by every join. */
   private delegationRevisionVal: number | undefined;
+  /**
+   * Pushes that arrived while a join was waiting for its reply, in arrival
+   * order; `null` when no join is in flight.
+   *
+   * The node can push right behind its join reply, and both frames can come
+   * out of one socket read. The reply only resolves a promise; `joinImpl`
+   * installs the reading on a later turn. A push handled in between would be
+   * compared with the previous join's state (or with none), and then be
+   * overwritten by the older join reading. So a push is held here until the
+   * join has installed its reading and revision, and then applied in order.
+   */
+  private pendingPushes: Array<{ payload: unknown; revisionSource?: string }> | null = null;
   private protocols: string[] = [];
   private joined = false;
   private left = false;
@@ -455,11 +478,18 @@ export class Channel {
    * `seed`, which swaps the whole array. A send already choosing its
    * attachments holds the array it read first, so it uses the old set or the
    * new one and never a mix.
+   *
+   * A push that arrives while a join is waiting for its reply is held until
+   * that join has installed its reading, then applied — see `pendingPushes`.
    */
-  onDelegationPush(payload: unknown): void {
+  onDelegationPush(payload: unknown, revisionSource?: string): void {
+    if (this.pendingPushes) {
+      this.pendingPushes.push({ payload, revisionSource });
+      return;
+    }
     if (!this.delegationRefreshRequested || this.left) return;
     if (this.delegatedVal === undefined || this.delegationRevisionVal === undefined) return;
-    const push = parseDelegationPush(payload);
+    const push = parseDelegationPush(payload, revisionSource);
     if (!push) return;
     if (push.revision <= this.delegationRevisionVal) return;
 
@@ -551,7 +581,26 @@ export class Channel {
     }
 
     const replyPromise = this.connection.trackPendingRef(ref);
+    // From here until this join has installed its reading, pushes on this
+    // topic are held, never compared with the previous join's state.
+    this.pendingPushes = [];
+    try {
+      this.installJoinReply(await this.awaitJoinReply(ref, joinPayload, replyPromise, signal), requestRefresh);
+    } catch (err) {
+      this.pendingPushes = null;
+      throw err;
+    }
+    const held = this.pendingPushes ?? [];
+    this.pendingPushes = null;
+    for (const p of held) this.onDelegationPush(p.payload, p.revisionSource);
+  }
 
+  private async awaitJoinReply(
+    ref: string,
+    joinPayload: Record<string, unknown>,
+    replyPromise: Promise<unknown>,
+    signal: AbortSignal | undefined,
+  ): Promise<unknown> {
     let onAbort: (() => void) | undefined;
     if (signal) {
       onAbort = () => {
@@ -585,7 +634,10 @@ export class Channel {
     if (signal?.aborted) {
       throw signal.reason ?? new Error("aborted");
     }
+    return rawReply;
+  }
 
+  private installJoinReply(rawReply: unknown, requestRefresh: boolean): void {
     const reply = rawReply as {
       status?: string;
       response?: {

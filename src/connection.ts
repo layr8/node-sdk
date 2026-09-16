@@ -24,6 +24,52 @@ export function marshalPhoenixMsg(msg: PhoenixMessage): string {
   ]);
 }
 
+/**
+ * The literal text of the `revision` member of a raw Phoenix frame's payload
+ * (the object that is the frame array's fifth element), or `undefined` when
+ * there is none. String contents are skipped, so a `"revision"` inside a
+ * string value is never read.
+ *
+ * `JSON.parse` turns `1.0` into `1`; this is what lets a push written with a
+ * non-integer revision be rejected, as the other SDKs reject it.
+ */
+export function delegationRevisionSource(frame: string): string | undefined {
+  let depth = 0;
+  let key: string | undefined; // a member name just read at depth 2
+  let i = 0;
+  while (i < frame.length) {
+    const ch = frame[i];
+    if (/\s/.test(ch)) {
+      i++;
+      continue;
+    }
+    if (ch === '"') {
+      let j = i + 1;
+      while (j < frame.length && frame[j] !== '"') j += frame[j] === "\\" ? 2 : 1;
+      const text = frame.slice(i + 1, j);
+      i = j + 1;
+      while (i < frame.length && /\s/.test(frame[i])) i++;
+      if (depth === 2 && frame[i] === ":") {
+        key = text;
+        i++;
+      } else {
+        key = undefined;
+      }
+      continue;
+    }
+    if (key === "revision" && depth === 2) {
+      let j = i;
+      while (j < frame.length && /[-+0-9.eE]/.test(frame[j])) j++;
+      return j > i ? frame.slice(i, j) : undefined;
+    }
+    key = undefined;
+    if (ch === "[" || ch === "{") depth++;
+    else if (ch === "]" || ch === "}") depth--;
+    i++;
+  }
+  return undefined;
+}
+
 export function unmarshalPhoenixMsg(data: string): PhoenixMessage {
   const arr = JSON.parse(data) as unknown[];
   if (!Array.isArray(arr) || arr.length !== 5) {
@@ -408,8 +454,9 @@ export class Connection {
       this.lastFrameAt = Date.now();
       this.disarmPongWait();
       try {
-        const msg = unmarshalPhoenixMsg(data.toString());
-        this.handleInbound(msg);
+        const text = data.toString();
+        const msg = unmarshalPhoenixMsg(text);
+        this.handleInbound(msg, text);
       } catch {
         // Phoenix wire format parse failure — not a DIDComm error.
         // Transport-level noise (e.g., truncated frames), matches Go SDK
@@ -446,7 +493,7 @@ export class Connection {
    *   phx_error  → route to Channel by topic.
    *   phx_close  → route to Channel by topic.
    */
-  private handleInbound(msg: PhoenixMessage): void {
+  private handleInbound(msg: PhoenixMessage, text: string): void {
     switch (msg.event) {
       case "phx_reply":
         if (msg.ref) {
@@ -468,7 +515,9 @@ export class Connection {
         // A replacement reading for a borrowed child. The
         // Channel decides whether it applies.
         const channel = this.channels.get(msg.topic);
-        if (channel) channel.onDelegationPush(msg.payload);
+        // The raw text goes along so the Channel can reject a `revision`
+        // written as `1.0`, which the parsed payload cannot show.
+        if (channel) channel.onDelegationPush(msg.payload, delegationRevisionSource(text));
         break;
       }
       case "phx_error":

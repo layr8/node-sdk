@@ -18,6 +18,7 @@ import type { AddressInfo } from "node:net";
 
 import { Layr8Client, type DelegatedCredentialsReading, type ErrorHandler } from "../src/index.js";
 import { parseDelegationPush } from "../src/channel.js";
+import { delegationRevisionSource } from "../src/connection.js";
 import { Wallet } from "../src/wallet.js";
 
 const PARENT = "did:web:example.com:agents:parent";
@@ -61,6 +62,15 @@ class FakeNode {
   });
   /** Hold every credential REST read until `releaseReads` — see the race test. */
   holdReads = false;
+  /**
+   * When set, every join reply is followed by this push in the SAME socket
+   * write (the socket is corked around both), so the client reads the two
+   * frames in one TCP read and handles them back to back — what a node that
+   * re-reads the parent right after the join does to a busy client.
+   */
+  pushAfterJoin: (() => unknown) | null = null;
+  /** Raw text of the push above, when a test needs a literal JSON cannot round-trip. */
+  rawPushAfterJoin: ((topic: string) => string) | null = null;
   private held: Array<() => void> = [];
 
   constructor() {
@@ -89,7 +99,18 @@ class FakeNode {
           const reading = this.joinReading(did);
           const response: Record<string, unknown> = { did, capabilities: this.capabilities };
           if (reading !== undefined) response.delegated_credentials = reading;
+          const behind = this.rawPushAfterJoin
+            ? this.rawPushAfterJoin(topic)
+            : this.pushAfterJoin
+              ? JSON.stringify([null, null, topic, "delegated_credentials", this.pushAfterJoin()])
+              : null;
+          const sock = (ws as unknown as { _socket: import("node:net").Socket })._socket;
+          if (behind !== null) sock.cork();
           ws.send(JSON.stringify([joinRef, ref, topic, "phx_reply", { status: "ok", response }]));
+          if (behind !== null) {
+            ws.send(behind);
+            process.nextTick(() => sock.uncork());
+          }
           return;
         }
         if (ref) {
@@ -106,6 +127,10 @@ class FakeNode {
   }
 
   /** Push `delegated_credentials` on `did`'s topic, as the node's channel does. */
+  pushRaw(text: string): void {
+    this.socket?.send(text);
+  }
+
   pushReading(did: string, payload: unknown): void {
     this.socket?.send(JSON.stringify([null, null, `plugins:${did}`, "delegated_credentials", payload]));
   }
@@ -373,6 +398,9 @@ describe("a rejoin starts the revision again", () => {
 });
 
 describe("a send racing a push uses one set, never a mix", () => {
+  // This one exercises `Wallet` alone, which this change does not touch; it
+  // documents the property the push relies on. The end-to-end test below is
+  // the one that guards the push itself.
   it("a send already choosing attachments keeps the set it started with", async () => {
     // Two parent grants on each side, so a mix (one old, one new) is visible.
     const target = { recipients: [PEER], typeUri: `${PROTO}/note` };
@@ -432,6 +460,85 @@ describe("a send racing a push uses one set, never a mix", () => {
     expect(first).toEqual(["child-of-urn:uuid:old-a", "child-of-urn:uuid:old-b"]);
     // The next send reads the cached (empty) REST answer and the new set.
     expect((await attachedIds(c)).sort()).toEqual(["child-of-urn:uuid:new-a", "child-of-urn:uuid:new-b"]);
+  });
+});
+
+describe("a push right behind the join reply (same socket read)", () => {
+  const p9 = () => ({ revision: 1, status: "complete", credentials: [child("urn:uuid:p9")] });
+  const rejoin = (c: Layr8Client) =>
+    (c as unknown as { primaryChannel: { rejoin(): Promise<void> } }).primaryChannel.rejoin();
+
+  it("first join: the push is applied to the reading and the wallet", async () => {
+    const c = await borrowed((n) => {
+      n.pushAfterJoin = p9;
+    });
+    await tick();
+    expect(c.delegatedCredentials()?.credentials).toEqual([child("urn:uuid:p9")]);
+    expect(await attachedIds(c)).toEqual(["child-of-urn:uuid:p9"]);
+  });
+
+  it("rejoin after revision 0: the push is not overwritten by the older join reading", async () => {
+    const c = await borrowed();
+    node!.pushAfterJoin = p9;
+    await rejoin(c);
+    await tick();
+    expect(c.delegatedCredentials()?.credentials).toEqual([child("urn:uuid:p9")]);
+    expect(await attachedIds(c)).toEqual(["child-of-urn:uuid:p9"]);
+  });
+
+  it("rejoin after revision 3: the new connection's revision 1 is not compared with the old one", async () => {
+    const c = await borrowed();
+    node!.pushReading(CHILD, { revision: 3, status: "complete", credentials: [child("urn:uuid:p3")] });
+    await tick();
+    expect(c.delegatedCredentials()?.credentials).toEqual([child("urn:uuid:p3")]);
+
+    node!.pushAfterJoin = p9;
+    await rejoin(c);
+    await tick();
+    expect(c.delegatedCredentials()?.credentials).toEqual([child("urn:uuid:p9")]);
+    expect(await attachedIds(c)).toEqual(["child-of-urn:uuid:p9"]);
+  });
+
+  it("a held push still goes through the revision check (not newer than the join reply)", async () => {
+    const c = await borrowed((n) => {
+      n.joinReading = () => ({ status: "complete", credentials: [child("urn:uuid:p1")], revision: 2 });
+      n.pushAfterJoin = p9;
+    });
+    await tick();
+    expect(c.delegatedCredentials()?.credentials).toEqual([child("urn:uuid:p1")]);
+  });
+});
+
+describe("revision must be a JSON integer literal", () => {
+  it("reads the literal off the raw frame, skipping strings and nested members", () => {
+    expect(delegationRevisionSource('[null,null,"t","delegated_credentials",{"revision":1.0}]')).toBe("1.0");
+    expect(delegationRevisionSource('[null,null,"t","delegated_credentials",{ "revision" : 7 ,"status":"complete"}]')).toBe("7");
+    expect(
+      delegationRevisionSource(
+        '[null,null,"t","delegated_credentials",{"credentials":[{"revision":9,"x":"\\"revision\\":5"}],"status":"complete","revision":2}]',
+      ),
+    ).toBe("2");
+    expect(delegationRevisionSource('[null,null,"t","delegated_credentials",{"revision":"1"}]')).toBeUndefined();
+    expect(delegationRevisionSource('[null,null,"t","delegated_credentials",{"status":"complete"}]')).toBeUndefined();
+  });
+
+  it("rejects 1.0 and 1e0 given their source, accepts 1", () => {
+    const payload = { revision: 1, status: "complete", credentials: [] };
+    expect(parseDelegationPush(payload, "1.0")).toBeUndefined();
+    expect(parseDelegationPush(payload, "1e0")).toBeUndefined();
+    expect(parseDelegationPush(payload, "1")).toEqual({ revision: 1, reading: { status: "complete", credentials: [] } });
+  });
+
+  it("drops a push whose revision is written 1.0 on the wire", async () => {
+    const c = await borrowed();
+    const creds = JSON.stringify([child("urn:uuid:p2")]);
+    node!.pushRaw(`[null,null,"plugins:${CHILD}","delegated_credentials",{"revision":1.0,"status":"complete","credentials":${creds}}]`);
+    await tick();
+    expect(c.delegatedCredentials()?.credentials).toEqual([child("urn:uuid:p1")]);
+
+    node!.pushRaw(`[null,null,"plugins:${CHILD}","delegated_credentials",{"revision":1,"status":"complete","credentials":${creds}}]`);
+    await tick();
+    expect(c.delegatedCredentials()?.credentials).toEqual([child("urn:uuid:p2")]);
   });
 });
 
