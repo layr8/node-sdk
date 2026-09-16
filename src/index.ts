@@ -77,6 +77,7 @@ export {
   logErrors,
 } from "./errors.js";
 export type { ErrorHandler } from "./errors.js";
+export { DELEGATION_REFRESH_CAPABILITY } from "./channel.js";
 export type {
   ServerReply,
   DelegatedCredential,

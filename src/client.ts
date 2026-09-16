@@ -140,6 +140,29 @@ export class DidHandle {
   sendAck(ids: string[]): void {
     this._channel.sendAck(ids);
   }
+
+  /**
+   * What the node delegated to this DID: the join reply's reading, replaced
+   * by every push the node sends while the handle is live.
+   * Same six-row reading as `Layr8Client.delegatedCredentials()`.
+   */
+  delegatedCredentials(): DelegatedCredentialsReading | undefined {
+    return this._channel.delegatedCredentials();
+  }
+
+  /** Whether the node advertised `ephemeral_delegation/1` at this DID's join. */
+  supportsEphemeralDelegation(): boolean {
+    return this._channel.supportsEphemeralDelegation();
+  }
+
+  /**
+   * Whether the node advertised `ephemeral_delegation_refresh/1` at this
+   * DID's join. `false` means the join reply is the only reading this handle
+   * will get; `true` and no `delegation` event means nothing changed.
+   */
+  supportsEphemeralDelegationRefresh(): boolean {
+    return this._channel.supportsEphemeralDelegationRefresh();
+  }
 }
 
 /**
@@ -148,8 +171,15 @@ export class DidHandle {
  * Lifecycle: `new Layr8Client` → `handle` (register handlers) → `connect`
  * → (optionally `joinDid` to host additional DIDs) → ... → `close`.
  *
- * Extends EventEmitter for "disconnect", "reconnect", "inbound" and
- * "outbound" events.
+ * Extends EventEmitter for "disconnect", "reconnect", "inbound",
+ * "outbound" and "delegation" events.
+ *
+ * `"delegation"` — `(did: string, reading: DelegatedCredentialsReading)` —
+ * fires when the node pushed a replacement delegated set for a borrowed
+ * child DID (the primary one or one joined with `joinDid`) and it was
+ * applied. The wallet already attaches the new set when it fires, and
+ * `delegatedCredentials()` already returns it. It does not fire for joins or
+ * rejoins; `"reconnect"` covers those.
  */
 /** The one inbound type `noteDenial` cares about. */
 const PROBLEM_REPORT_TYPE = "https://didcomm.org/report-problem/2.0/problem-report";
@@ -436,6 +466,7 @@ export class Layr8Client extends EventEmitter {
       {
         onMessage: (payload) => this.dispatchInbound(channel, payload),
         onDelegatedCredentials: (did, reading) => this.applyDelegated(did, reading),
+        onDelegationRefreshed: (did, reading) => this.emitDelegation(did, reading),
       },
       this.cfg.didSpec,
     );
@@ -496,6 +527,7 @@ export class Layr8Client extends EventEmitter {
         // the credentials the node minted for its CURRENT DID document, not
         // the ones from a document a rejoin replaced.
         onDelegatedCredentials: (holder, reading) => this.applyDelegated(holder, reading),
+        onDelegationRefreshed: (holder, reading) => this.emitDelegation(holder, reading),
       },
       opts.didSpec,
     );
@@ -576,6 +608,32 @@ export class Layr8Client extends EventEmitter {
    */
   supportsEphemeralDelegation(): boolean {
     return this.primaryChannel?.supportsEphemeralDelegation() ?? false;
+  }
+
+  /**
+   * Whether the node advertised `ephemeral_delegation_refresh/1` at the
+   * primary join — that it pushes a replacement set when the parent's grants
+   * change. The SDK asks for this on every join that names a `parentDid`.
+   * `false` means the join reply is the only reading this connection gets.
+   */
+  supportsEphemeralDelegationRefresh(): boolean {
+    return this.primaryChannel?.supportsEphemeralDelegationRefresh() ?? false;
+  }
+
+  /**
+   * Emit `"delegation"` without letting a throwing listener reach the socket's
+   * read loop, which would drop every frame after it. A throw goes to
+   * `onError` instead.
+   */
+  private emitDelegation(did: string, reading: DelegatedCredentialsReading): void {
+    try {
+      this.emit("delegation", did, reading);
+    } catch (err) {
+      this.onError(new SDKError(ErrorKind.HandlerException, {
+        type: "delegated_credentials",
+        cause: err instanceof Error ? err : new Error(String(err)),
+      }));
+    }
   }
 
   private applyDelegated(

@@ -442,6 +442,7 @@ export class Connection {
    *                uniformly, since join requests also live in pendingRefs
    *                while waiting for their reply).
    *   message    → route to Channel by topic.
+   *   delegated_credentials → route to Channel by topic.
    *   phx_error  → route to Channel by topic.
    *   phx_close  → route to Channel by topic.
    */
@@ -461,6 +462,13 @@ export class Connection {
       case "message": {
         const channel = this.channels.get(msg.topic);
         if (channel) channel.onMessage(msg.payload);
+        break;
+      }
+      case "delegated_credentials": {
+        // A replacement reading for a borrowed child. The
+        // Channel decides whether it applies.
+        const channel = this.channels.get(msg.topic);
+        if (channel) channel.onDelegationPush(msg.payload);
         break;
       }
       case "phx_error":
