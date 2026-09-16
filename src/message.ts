@@ -60,6 +60,36 @@ export interface Attachment {
   };
 }
 
+/**
+ * W3C trace context carried in the DIDComm plaintext header `trace_context`.
+ *
+ * The member names are the W3C header names, so the object is a ready-made
+ * text-map carrier for an OpenTelemetry propagator. `traceparent` is a W3C
+ * Trace Context Level 1 value; `tracestate` is optional. This SDK carries the
+ * value; it does not validate the `traceparent` format (the node does).
+ */
+export interface TraceContext {
+  traceparent: string;
+  tracestate?: string;
+}
+
+/**
+ * Reads a `trace_context` header value.
+ *
+ * Returns `undefined` for anything that is not an object with a string
+ * `traceparent`. That is never an error: a malformed header must not stop a
+ * message from being parsed. Only the two defined members are kept; any other
+ * member is dropped and never forwarded.
+ */
+export function readTraceContext(value: unknown): TraceContext | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const { traceparent, tracestate } = value as Record<string, unknown>;
+  if (typeof traceparent !== "string") return undefined;
+  return typeof tracestate === "string" ? { traceparent, tracestate } : { traceparent };
+}
+
 /** A DIDComm v2 message. */
 export interface Message {
   id: string;
@@ -70,6 +100,13 @@ export interface Message {
   parentThreadId: string;
   body: unknown;
   attachments?: Attachment[];
+  /**
+   * The `trace_context` header. Absent when the message carried none, or
+   * carried one this SDK could not read. A handler's reply and the problem
+   * report for a failed handler copy the request's value when the reply does
+   * not set its own.
+   */
+  traceContext?: TraceContext;
   context?: MessageContext;
 }
 
@@ -128,6 +165,7 @@ interface DIDCommEnvelope {
   pthid?: string;
   body: unknown;
   attachments?: Attachment[];
+  trace_context?: TraceContext;
 }
 
 /** Serialize a Message into DIDComm JSON wire format. */
@@ -142,6 +180,8 @@ export function marshalDIDComm(msg: InternalMessage): string {
   if (msg.threadId) env.thid = msg.threadId;
   if (msg.parentThreadId) env.pthid = msg.parentThreadId;
   if (msg.attachments && msg.attachments.length > 0) env.attachments = msg.attachments;
+  const traceContext = readTraceContext(msg.traceContext);
+  if (traceContext) env.trace_context = traceContext;
   return JSON.stringify(env);
 }
 
@@ -163,6 +203,7 @@ interface InboundEnvelope {
     pthid?: string;
     body?: unknown;
     attachments?: Attachment[];
+    trace_context?: unknown;
   };
 }
 
@@ -182,6 +223,8 @@ export function parseDIDComm(data: unknown): InternalMessage {
     bodyRaw: pt.body,
     ...(pt.attachments ? { attachments: pt.attachments } : {}),
   };
+  const traceContext = readTraceContext(pt.trace_context);
+  if (traceContext) msg.traceContext = traceContext;
 
   if (env.context) {
     const creds: SenderCredential[] = (env.context.sender_credentials || []).map(

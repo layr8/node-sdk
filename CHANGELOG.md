@@ -6,6 +6,26 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-09-16
+
+### Added
+
+- **The `trace_context` plaintext header is carried.** A DIDComm message may
+  carry a W3C trace context in a top-level `trace_context` object
+  (`traceparent`, optional `tracestate`). The SDK used to drop it on parse and
+  never wrote it. It is now `Message.traceContext` (type `TraceContext`):
+  `parseDIDComm` reads it, `marshalDIDComm` writes it, and `send()` /
+  `request()` carry a value the caller sets.
+- **A handler's reply joins the request's trace.** The auto-filled reply copies
+  the request's `traceContext` unchanged unless the handler set its own, in the
+  same place it already defaults `threadId`. The problem report sent for a
+  failed handler copies it too.
+
+  A value that is not an object with a string `traceparent` is dropped, never
+  an error, and members other than `traceparent` and `tracestate` are not
+  forwarded. The SDK does not validate the `traceparent` format. It does not
+  yet create a trace context for a new request that has none.
+
 ## [0.4.3] - 2026-09-15
 
 ### Fixed
@@ -454,6 +474,7 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
 - 16 new tests under `tests/multi-did.test.ts` covering `joinDid` lifecycle (before connect, duplicate DID, primary-DID rejection, `leaveDid`, close-tears-down-all), inbound routing by topic (per-DID first, fallback to client-global, override priority, unrelated topic drops), `DidHandle.send` (writes to its own topic, stamps `from`), and three reconnect scenarios (rejoin every Channel after WS drops, isolated rejoin failure in multi-DID, single-DID rejoin failure retries the backoff loop).
 - 3 small test-bug fixes in `tests/client.test.ts` where the wrong topic literal (`plugin:lobby`, singular and incorrect) was masked by the old monolith's lack of topic routing. Updated to `plugins:<agentDid>` to match production.
 
+[0.4.4]: https://github.com/layr8/node-sdk/releases/tag/v0.4.4
 [0.4.3]: https://github.com/layr8/node-sdk/releases/tag/v0.4.3
 [0.4.0]: https://github.com/layr8/node-sdk/releases/tag/v0.4.0
 [0.3.0]: https://github.com/layr8/node-sdk/releases/tag/v0.3.0

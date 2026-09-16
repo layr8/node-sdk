@@ -44,6 +44,7 @@ export type {
   MessageContext,
   SenderCredential,
   InternalMessage,
+  TraceContext,
 } from "./message.js";
 // Re-export the deprecated Credential alias from message.ts for backwards compat.
 // The new W3C Credential from credentials.ts takes priority as the primary "Credential" export.
