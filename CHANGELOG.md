@@ -6,6 +6,25 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
 
 ## [Unreleased]
 
+### Added
+
+- **Mediation can act on a DID joined with `joinDid`, not only on the primary.**
+  Every step in `mediation.*` takes an optional `did` — `enroll`, `declare`,
+  `undeclare`, `collect`, `pickup`, `live`, `status` and `bootstrap` — and
+  defaults to the primary DID, so no existing caller changes. A DID that is
+  neither the primary nor joined is refused by name rather than sent as the
+  primary, because the far end answers a step from the wrong DID exactly as it
+  answers a right one.
+- **`joinDid({ mediated: true })`** binds both mediation protocols on that
+  DID's join and registers the live `delivery` handler for it, so the
+  acknowledgement for a push collected on that DID goes out as that DID. The
+  two are one flag because either alone fails while reporting success: without
+  the protocols the node never routes a push to the channel, and without the
+  handler the push is dropped as unhandled. It binds and handles only —
+  enrolment stays the caller's `mediation.bootstrap(client, m, { did })`, and
+  the caller re-runs it on `client.on("reconnect")`; the automatic re-run
+  driven by `cfg.mediator` still covers the primary alone.
+
 ## [0.4.8] - 2026-09-17
 
 ### Fixed

@@ -93,6 +93,27 @@ export interface JoinDidOptions {
   handlers?: Record<string, HandlerFn | JoinDidHandler>;
   /** DID spec for the join's `did_spec` payload (matches the global Config shape). */
   didSpec?: DidSpec;
+  /**
+   * Mediate this DID: bind both mediation protocols on the join AND register
+   * the live `delivery` handler for it. One flag, because either half alone
+   * fails while looking healthy — bind the protocols and forget the handler
+   * and every push is dropped as unhandled; register the handler and forget
+   * the protocols and the node never routes a push to this channel at all,
+   * while enrolment, the drain and `live_delivery: true` all report success.
+   *
+   * Opt-in rather than inferred: `cfg.mediator` names the PRIMARY's mediator,
+   * and a joined DID may have a different one or none. A caller that passes
+   * the two protocols itself gets them once, not twice.
+   *
+   * This binds and handles; it does not enrol. Run
+   * `mediation.bootstrap(client, mediatorDid, { did })` yourself, and again on
+   * `client.on("reconnect", ...)`: the automatic re-run driven by
+   * `cfg.mediator` bootstraps the primary only.
+   *
+   * hygiene-ok: "mediator" here is the DIDComm role of
+   * coordinate-mediation/3.0, not a reference to any particular deployment.
+   */
+  mediated?: boolean;
   /** Abort the join. */
   signal?: AbortSignal;
 }
@@ -514,9 +535,19 @@ export class Layr8Client extends EventEmitter {
     // cloud-node can deliver problem reports targeted at it (mirrors the
     // auto-add in `connect()`). Skip when the caller already has it.
     const PROBLEM_REPORT_PROTOCOL = "https://didcomm.org/report-problem/2.0";
-    const protocols = opts.protocols.includes(PROBLEM_REPORT_PROTOCOL)
-      ? opts.protocols
-      : [...opts.protocols, PROBLEM_REPORT_PROTOCOL];
+    const protocols = [...opts.protocols];
+    if (!protocols.includes(PROBLEM_REPORT_PROTOCOL)) {
+      protocols.push(PROBLEM_REPORT_PROTOCOL);
+    }
+    // A mediated DID must bind BOTH mediation protocols here, for the same
+    // reason connect() adds them for the primary: the node routes to a channel
+    // only the protocols that channel bound, so a missing one is a reply or a
+    // push that is never delivered while every step still reports success.
+    if (opts.mediated) {
+      for (const p of MEDIATION_PROTOCOLS) {
+        if (!protocols.includes(p)) protocols.push(p);
+      }
+    }
 
     const channel = new Channel(
       this.connection,
@@ -543,14 +574,21 @@ export class Layr8Client extends EventEmitter {
 
     this.didChannels.set(did, channel);
 
-    if (opts.handlers && Object.keys(opts.handlers).length > 0) {
+    const handlerEntries = Object.entries(opts.handlers ?? {});
+    if (handlerEntries.length > 0 || opts.mediated) {
       const reg = new HandlerRegistry();
-      for (const [msgType, h] of Object.entries(opts.handlers)) {
+      for (const [msgType, h] of handlerEntries) {
         if (typeof h === "function") {
           reg.register(msgType, h);
         } else {
           reg.register(msgType, h.fn, h.manualAck ? { manualAck: true } : undefined);
         }
+      }
+      // Built FOR this DID, so the acknowledgement it sends goes out as this
+      // DID — the one the mediation row belongs to. A handler the caller
+      // registered for the delivery type wins; it asked for the pushes.
+      if (opts.mediated && !(DELIVERY_TYPE in (opts.handlers ?? {}))) {
+        reg.register(DELIVERY_TYPE, deliveryHandler(this, did));
       }
       this.didHandlers.set(did, reg);
     }
@@ -923,6 +961,39 @@ export class Layr8Client extends EventEmitter {
   }
 
   // --- internal: per-Channel send/request helpers (used by DidHandle too) ---
+
+  /**
+   * @internal Request FROM `did` — the primary DID when `did` is undefined.
+   *
+   * A DID that is neither the primary nor one joined with `joinDid` is refused
+   * by name. It is NOT served from the primary: the far end answers a request
+   * from the wrong DID exactly as it answers a right one, so the fallback
+   * would be invisible at the call site and wrong on the wire.
+   */
+  async _requestAsDid(
+    did: string | undefined,
+    msg: Partial<Message>,
+    opts?: RequestOptions,
+  ): Promise<Message> {
+    return this._requestOnChannel(this._channelForDid(did), msg, opts);
+  }
+
+  /** @internal The Channel hosting `did`, or the primary's when undefined. */
+  _channelForDid(did?: string): Channel {
+    if (!this.connected || !this.primaryChannel) {
+      throw new NotConnectedError();
+    }
+    if (did === undefined || did === this.agentDid || did === this.primaryChannel.did) {
+      return this.primaryChannel;
+    }
+    const channel = this.didChannels.get(did);
+    if (!channel) {
+      throw new Error(
+        `DID not hosted by this client: ${did} — join it with joinDid() first`,
+      );
+    }
+    return channel;
+  }
 
   /** @internal */
   async _sendOnChannel(

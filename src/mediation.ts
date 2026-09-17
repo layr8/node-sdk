@@ -19,6 +19,30 @@
  * (or `LAYR8_MEDIATOR_DID`). Steps: `enroll` → `declare` → `pickup` → `live`.
  * Every step is also callable by hand; none throws for a remote refusal —
  * they return `{ ok: false, ... }` results — only programming errors throw.
+ *
+ * ## Mediating a DID that is not the primary
+ *
+ * Every step takes an optional `did`, defaulting to `client.did`. Give it a
+ * DID joined with `client.joinDid` and the step acts as that DID — the
+ * enrolment, the declaration and, above all, the acknowledgement. The
+ * acknowledgement is the one that fails quietly: an ack sent as the wrong DID
+ * is accepted and clears nothing, so the drain reports what it collected and
+ * the mailbox never empties.
+ *
+ *   const agent = await client.joinDid(agentDid, { protocols, mediated: true })
+ *   await mediation.bootstrap(client, mediatorDid, { did: agent.did })
+ *
+ * `mediated: true` is what binds both mediation protocols on that DID's join
+ * and registers the live `delivery` handler for it; without it the node has no
+ * channel to route a push to. Nothing else is automatic for a joined DID:
+ * `cfg.mediator` bootstraps the PRIMARY on every (re)connect, and a joined DID
+ * has no such loop. After a reconnect the caller re-runs `bootstrap` itself —
+ * `client.on("reconnect", ...)` is the place — and it must drain before
+ * re-arming live mode, because live delivery is cleared by the first push that
+ * fails and the messages behind it are already queued.
+ *
+ * hygiene-ok: "mediator" throughout this module is the DIDComm role defined by
+ * coordinate-mediation/3.0, not a reference to any particular deployment.
  */
 
 import type { Layr8Client } from "./client.js";
@@ -46,6 +70,16 @@ export type MediationFailure = { ok: false; error: string | ProblemReportError }
 export interface MediationOptions {
   /** Deadline per request to the mediator (default 20 s). */
   timeoutMs?: number;
+  /**
+   * The DID to act as. Default: the client's primary DID (`client.did`).
+   *
+   * Any other value must name a DID joined with `client.joinDid`. A DID that
+   * is neither is refused by name rather than served from the primary: a step
+   * taken as the wrong DID is answered normally — the grant is issued, the
+   * declaration lands, the acknowledgement is accepted — against a mediation
+   * row nobody asked about, and the caller still sees `{ ok: true }`.
+   */
+  did?: string;
 }
 
 export interface EnrollOptions extends MediationOptions {
@@ -84,7 +118,8 @@ async function request(
   body: unknown,
   opts?: MediationOptions,
 ): Promise<Message> {
-  return client.request(
+  return client._requestAsDid(
+    opts?.did,
     { type, to: [mediator], body },
     { signal: AbortSignal.timeout(opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS) },
   );
@@ -134,7 +169,7 @@ export async function enroll(
     const routing = (grant.body as { routing_did?: string | string[] })?.routing_did;
     const routingDid = Array.isArray(routing) ? routing : routing ? [routing] : [];
 
-    const own = client.did;
+    const own = opts?.did ?? client.did;
     const recipients = Array.from(new Set([own, ...(opts?.recipients ?? [])]));
     const updates = recipients.map((d) => ({ recipient_did: d, action: "add" }));
     const resp = await request(client, mediator, `${CM}recipient-update`, { updates }, opts);
@@ -158,9 +193,13 @@ export async function enroll(
  * node deposits messages there while the agent is offline and the DID
  * document advertises it as `routingKeys`.
  */
-export async function declare(client: Layr8Client, mediator: string): Promise<SimpleResult> {
+export async function declare(
+  client: Layr8Client,
+  mediator: string,
+  opts?: MediationOptions,
+): Promise<SimpleResult> {
   try {
-    await client._rest.put(mediatorPath(client.did), { routing_did: mediator });
+    await client._rest.put(mediatorPath(opts?.did ?? client.did), { routing_did: mediator });
     return { ok: true };
   } catch (err) {
     return fail(err);
@@ -168,9 +207,12 @@ export async function declare(client: Layr8Client, mediator: string): Promise<Si
 }
 
 /** Removes this agent's mediator declaration on its node. */
-export async function undeclare(client: Layr8Client): Promise<SimpleResult> {
+export async function undeclare(
+  client: Layr8Client,
+  opts?: MediationOptions,
+): Promise<SimpleResult> {
   try {
-    await client._rest.delete(mediatorPath(client.did));
+    await client._rest.delete(mediatorPath(opts?.did ?? client.did));
     return { ok: true };
   } catch (err) {
     return fail(err);
@@ -293,9 +335,9 @@ export async function status(
  * pushes: re-inject and acknowledge, no reply.
  * @internal
  */
-export function deliveryHandler(client: Layr8Client): HandlerFn {
+export function deliveryHandler(client: Layr8Client, did?: string): HandlerFn {
   return async (msg: Message) => {
-    await collect(client, msg.from, msg.attachments ?? []);
+    await collect(client, msg.from, msg.attachments ?? [], did ? { did } : undefined);
     return null;
   };
 }
@@ -311,7 +353,7 @@ export async function bootstrap(
 ): Promise<{ ok: true; collected: number } | { ok: false; step: string; error: MediationFailure["error"] }> {
   const e = await enroll(client, mediator, opts);
   if (!e.ok) return { ok: false, step: "enroll", error: e.error };
-  const d = await declare(client, mediator);
+  const d = await declare(client, mediator, opts);
   if (!d.ok) return { ok: false, step: "declare", error: d.error };
   const p = await pickup(client, mediator, opts);
   if (!p.ok) return { ok: false, step: "pickup", error: p.error };
