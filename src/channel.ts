@@ -303,7 +303,12 @@ export class Channel {
 
     try {
       this.connection.writeMsg({
-        joinRef: null,
+        // Must be the ref this topic was joined with. Phoenix (V2 serializer)
+        // forwards a `phx_leave` to the channel only when its join_ref matches;
+        // `null` is dropped without a reply, so the node kept the DID bound,
+        // its delegation refresh running and its name taken until the whole
+        // WebSocket closed.
+        joinRef: this.joinRef || null,
         ref: this.connection.nextRef(),
         topic: this.topic,
         event: "phx_leave",
