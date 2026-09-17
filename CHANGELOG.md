@@ -6,6 +6,8 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
 
 ## [Unreleased]
 
+## [0.4.7] - 2026-09-17
+
 ### Fixed
 
 - **`leaveDid()` now actually leaves.** `phx_leave` was sent with a `null`
