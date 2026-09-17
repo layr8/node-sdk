@@ -231,11 +231,15 @@ export async function undeclare(
  * Posts each attachment's ciphertext to this agent's node at `/didcomm`.
  * Returns the ids that went in and the ids that did not (those are never
  * acknowledged, so the mediator keeps them).
+ *
+ * This is the one step that takes no `did`: the ciphertext names its own
+ * recipient and the node routes on it, so there is nothing here for a DID to
+ * change. The type says so rather than accepting a field it would ignore.
  */
 export async function reinject(
   client: Layr8Client,
   attachments: Attachment[],
-  opts?: PickupOptions,
+  opts?: Omit<PickupOptions, "did">,
 ): Promise<{ ok: string[]; failed: string[] }> {
   const url = opts?.didcommUrl ?? client.didcommUrl;
   const ok: string[] = [];

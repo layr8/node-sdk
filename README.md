@@ -581,9 +581,10 @@ to the mediator need none.
 ### Mediating a DID you joined
 
 A client can hold one DID as its primary and join others with `joinDid`. When
-the mediation belongs to a joined DID, pass it — every step in the `mediation`
-namespace takes an optional `did` and defaults to the primary, so nothing above
-changes:
+the mediation belongs to a joined DID, pass it — every step that speaks for a
+DID takes an optional `did` and defaults to the primary, so nothing above
+changes. (`reinject` is the exception and takes none: the ciphertext names its
+own recipient.)
 
 ```typescript
 const agent = await client.joinDid(agentDid, {
