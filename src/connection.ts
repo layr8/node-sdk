@@ -366,8 +366,10 @@ export class Connection {
   }
 
   /**
-   * Close the Connection. Sends `phx_leave` for every registered Channel,
-   * stops liveness timers, rejects all pending refs, closes the WebSocket.
+   * Close the Connection. Marks every registered Channel closed (no
+   * `phx_leave` is sent here; `Layr8Client.close()` leaves its additional
+   * Channels before calling this), stops liveness timers, rejects all
+   * pending refs, closes the WebSocket.
    *
    * After `close()`, `dial()` will throw — construct a new Connection.
    */
@@ -378,8 +380,8 @@ export class Connection {
 
     this.stopLivenessTimers();
 
-    // Send phx_leave for every Channel (best-effort) and let them tear
-    // down their per-Channel state.
+    // Let every Channel tear down its per-Channel state. This writes no
+    // phx_leave: onConnectionClose only flips the Channel's flags.
     for (const channel of this.channels.values()) {
       try {
         channel.onConnectionClose();

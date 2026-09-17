@@ -27,9 +27,12 @@ class MockServer {
    * with; any other leave — including `join_ref: null` on a V2 socket — is
    * dropped with no reply and the channel stays joined. This mock applies the
    * same rule, so a leave the real node would ignore does not land here.
+   * Join refs are tracked per connection, as Phoenix does: a new socket knows
+   * none of the previous one's joins.
    */
   readonly leftTopics: string[] = [];
-  private readonly joinRefs = new Map<string, string | null>();
+  /** Every accepted phx_join, in order, with the join ref it carried. */
+  readonly joinLog: Array<{ topic: string; joinRef: string | null }> = [];
   readonly sent: Array<{ event: string; topic: string; payload: unknown }> = [];
 
   /**
@@ -44,6 +47,7 @@ class MockServer {
     this.wss = ephemeralServer();
     this.wss.on("connection", (ws: WS) => {
       this.client = ws;
+      const joinRefs = new Map<string, string | null>();
       ws.on("message", (data: Buffer) => {
         const arr = JSON.parse(data.toString()) as unknown[];
         const joinRef = arr[0] as string | null;
@@ -64,7 +68,8 @@ class MockServer {
             return;
           }
           this.joinedTopics.push(topic);
-          this.joinRefs.set(topic, joinRef);
+          joinRefs.set(topic, joinRef);
+          this.joinLog.push({ topic, joinRef });
           ws.send(JSON.stringify([
             ref, ref, topic, "phx_reply",
             { status: "ok", response: { did: topic.replace("plugins:", "") } },
@@ -72,11 +77,11 @@ class MockServer {
           return;
         }
         if (event === "phx_leave") {
-          if (!this.joinRefs.has(topic)) return;
-          const existing = this.joinRefs.get(topic);
+          if (!joinRefs.has(topic)) return;
+          const existing = joinRefs.get(topic);
           // Phoenix: `existing_join_ref in [join_ref, nil]`, otherwise ignored.
           if (existing !== joinRef && existing !== null) return;
-          this.joinRefs.delete(topic);
+          joinRefs.delete(topic);
           this.leftTopics.push(topic);
           ws.send(JSON.stringify([joinRef, ref, topic, "phx_reply", { status: "ok", response: {} }]));
           return;
@@ -405,6 +410,39 @@ describe("Layr8Client multi-DID — reconnect", () => {
       to: ["did:web:peer"],
       body: { content: "alice post-reconnect" },
     });
+
+    await client.close();
+  }, 15_000);
+
+  it("leaveDid after a reconnect carries the rejoin's join ref, not the first join's", async () => {
+    const client = newClient();
+    await client.connect();
+    // Connection.dialImpl resets the ref counter on every dial, so a rejoin in
+    // the same order usually gets the same ref as the first join and a stale
+    // ref would go unnoticed. A send before the first joinDid moves BOB's
+    // first join ref past the one its rejoin will get.
+    await client.send({
+      type: "https://didcomm.org/basicmessage/2.0/message",
+      to: ["did:web:peer"],
+      body: { content: "shift the ref counter" },
+    });
+    await client.joinDid(BOB, { protocols: ["x"] });
+
+    const reconnected = new Promise<void>((resolve) =>
+      client.once("reconnect", resolve),
+    );
+    server.dropClient();
+    await reconnected;
+
+    const bobJoins = server.joinLog.filter((j) => j.topic === `plugins:${BOB}`);
+    expect(bobJoins).toHaveLength(2);
+    expect(bobJoins[1].joinRef).not.toEqual(bobJoins[0].joinRef);
+
+    await client.leaveDid(BOB);
+    await delay(50);
+
+    // The mock's join refs are per connection: only the rejoin's ref matches.
+    expect(server.leftTopics).toEqual([`plugins:${BOB}`]);
 
     await client.close();
   }, 15_000);
