@@ -15,10 +15,6 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
   the same: additional DIDs first, then the primary (with its join ref), then
   the WebSocket close. The leaves stay best effort and are not awaited, so a
   node that never replies cannot hold up `close()`.
-- On the auto-DID path (no `agentDid`), `phx_leave` now goes to the topic the
-  node joined (`plugins:`), not to the `plugins:<assigned DID>` topic the
-  client renames its Channel to after the join reply. Phoenix holds the join
-  under the topic it was sent to and ignores a leave for any other topic.
 
 ## [0.4.7] - 2026-09-17
 
