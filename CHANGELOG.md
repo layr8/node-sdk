@@ -14,7 +14,10 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
   defaults to the primary DID, so no existing caller changes. A DID that is
   neither the primary nor joined is refused by name rather than sent as the
   primary, because the far end answers a step from the wrong DID exactly as it
-  answers a right one.
+  answers a right one. The refusal reaches every step, including `declare` and
+  `undeclare`, whose REST write against the node would otherwise succeed; and
+  `collect` refuses before it re-injects anything, so a message is never put
+  into the node with no acknowledgement able to clear it from the queue.
 - **`joinDid({ mediated: true })`** binds both mediation protocols on that
   DID's join and registers the live `delivery` handler for it, so the
   acknowledgement for a push collected on that DID goes out as that DID. The

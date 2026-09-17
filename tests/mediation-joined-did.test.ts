@@ -34,6 +34,7 @@ import {
   Layr8Client,
   mediation,
   MEDIATION_DELIVERY_TYPE,
+  MEDIATION_PROTOCOLS,
   type Attachment,
   type ErrorHandler,
 } from "../src/index.js";
@@ -48,6 +49,8 @@ const PRIMARY = "did:web:n:agents:host";
 /** The DID joined beside it, whose mediation row this is. */
 const JOINED = "did:web:n:agents:acme";
 const MEDIATOR_DID = "did:web:n:agents:store-and-forward";
+/** A DID this client neither holds as its primary nor has joined. */
+const STRANGER = "did:web:n:agents:stranger";
 
 /** A DIDComm frame the fake node received, with the DID it went out as. */
 interface Outbound {
@@ -324,13 +327,31 @@ describe("the outbound steps act as the given DID", () => {
     await client.close();
   });
 
+  it("declare and undeclare refuse an unhosted DID before writing anything", async () => {
+    const { client } = await connected();
+
+    const put = await mediation.declare(client, MEDIATOR_DID, { did: STRANGER });
+    const del = await mediation.undeclare(client, { did: STRANGER });
+
+    expect(put.ok).toBe(false);
+    expect(del.ok).toBe(false);
+    expect(String((put as { error: unknown }).error)).toContain(STRANGER);
+    // The declaration is a REST write against the node. Sent for a DID this
+    // client does not hold, it succeeds and points that DID's routing
+    // somewhere nobody is listening.
+    expect(node.restCalls("PUT")).toEqual([]);
+    expect(node.restCalls("DELETE")).toEqual([]);
+
+    await client.close();
+  });
+
   it("refuses a DID that is neither the primary nor joined instead of falling back", async () => {
     const { client } = await connected();
 
-    const r = await mediation.status(client, MEDIATOR_DID, { did: "did:web:n:agents:stranger" });
+    const r = await mediation.status(client, MEDIATOR_DID, { did: STRANGER });
 
     expect(r.ok).toBe(false);
-    expect(String((r as { error: unknown }).error)).toContain("did:web:n:agents:stranger");
+    expect(String((r as { error: unknown }).error)).toContain(STRANGER);
     // Nothing went out as the primary in its place.
     expect(node.sentAs(`${PICKUP}status-request`)).toEqual([]);
 
@@ -349,6 +370,37 @@ describe("the acknowledgement goes out as the same DID", () => {
     expect(r).toEqual({ collected: 1, complete: true });
     expect(node.sentAs(`${PICKUP}messages-received`)).toEqual([JOINED]);
     expect(node.bodyOf(`${PICKUP}messages-received`)?.message_id_list).toEqual(["m1"]);
+
+    await client.close();
+  });
+
+  it("collect refuses an unhosted DID instead of reporting what it could not acknowledge", async () => {
+    const { client } = await connected();
+
+    // The ack for an unhosted DID cannot be sent at all. Answering `collected`
+    // would put the ciphertext into the node while nothing clears the queue,
+    // so the same message is delivered again on the next drain — and the
+    // caller was told it was collected.
+    await expect(
+      mediation.collect(client, MEDIATOR_DID, [att("m1", jwe("one"))], { did: STRANGER }),
+    ).rejects.toThrow(STRANGER);
+
+    expect(node.sentAs(`${PICKUP}messages-received`)).toEqual([]);
+    // The refusal comes before the re-injection, so nothing was delivered
+    // twice: the queue still holds the message and will offer it again.
+    expect(node.rest.filter((r) => r.url === "/didcomm")).toEqual([]);
+
+    await client.close();
+  });
+
+  it("pickup reports the refusal rather than a collected count", async () => {
+    const { client } = await connected();
+    node.deliveries.push([att("m1", jwe("one"))]);
+
+    const r = await mediation.pickup(client, MEDIATOR_DID, { did: STRANGER });
+
+    expect(r.ok).toBe(false);
+    expect(String((r as { error: unknown }).error)).toContain(STRANGER);
 
     await client.close();
   });
@@ -427,6 +479,27 @@ describe("the live delivery handler is per DID", () => {
       .toEqual([JOINED]);
     expect(node.bodyOf(`${PICKUP}messages-received`)?.message_id_list).toEqual(["live-1"]);
     expect(node.rest.filter((r) => r.url === "/didcomm").length).toBe(1);
+
+    await client.close();
+  });
+
+  it("a caller that passes the mediation protocols itself gets them once", async () => {
+    const client = new Layr8Client(discard, {
+      nodeUrl: node.url(),
+      apiKey: "k",
+      agentDid: PRIMARY,
+    });
+    client.handle("https://layr8.io/protocols/echo/1.0/request", async () => null);
+    await client.connect();
+    await client.joinDid(JOINED, {
+      protocols: [...MEDIATION_PROTOCOLS, "https://didcomm.org/basicmessage/2.0"],
+      mediated: true,
+    });
+
+    const bound = node.joined.get(JOINED) ?? [];
+    for (const p of MEDIATION_PROTOCOLS) {
+      expect(bound.filter((b) => b === p).length, p).toBe(1);
+    }
 
     await client.close();
   });

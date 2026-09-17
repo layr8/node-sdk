@@ -587,7 +587,7 @@ export class Layr8Client extends EventEmitter {
       // Built FOR this DID, so the acknowledgement it sends goes out as this
       // DID — the one the mediation row belongs to. A handler the caller
       // registered for the delivery type wins; it asked for the pushes.
-      if (opts.mediated && !(DELIVERY_TYPE in (opts.handlers ?? {}))) {
+      if (opts.mediated && !Object.hasOwn(opts.handlers ?? {}, DELIVERY_TYPE)) {
         reg.register(DELIVERY_TYPE, deliveryHandler(this, did));
       }
       this.didHandlers.set(did, reg);
@@ -988,11 +988,29 @@ export class Layr8Client extends EventEmitter {
     }
     const channel = this.didChannels.get(did);
     if (!channel) {
-      throw new Error(
-        `DID not hosted by this client: ${did} — join it with joinDid() first`,
-      );
+      throw new Error(this.notHostedMessage(did));
     }
     return channel;
+  }
+
+  /**
+   * @internal Throw unless `did` is the primary or one joined with `joinDid`.
+   *
+   * Deliberately says nothing about the connection, so a REST-only caller —
+   * `mediation.declare`, which works before `connect()` — can apply the same
+   * membership rule as the steps that go over the wire. A joined Channel stays
+   * in the map across a reconnect, so this answers the same either side of a
+   * drop.
+   */
+  _assertHostsDid(did?: string): void {
+    if (did === undefined || did === this.agentDid) return;
+    if (this.primaryChannel && did === this.primaryChannel.did) return;
+    if (this.didChannels.has(did)) return;
+    throw new Error(this.notHostedMessage(did));
+  }
+
+  private notHostedMessage(did: string): string {
+    return `DID not hosted by this client: ${did} — join it with joinDid() first`;
   }
 
   /** @internal */

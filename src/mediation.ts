@@ -74,10 +74,16 @@ export interface MediationOptions {
    * The DID to act as. Default: the client's primary DID (`client.did`).
    *
    * Any other value must name a DID joined with `client.joinDid`. A DID that
-   * is neither is refused by name rather than served from the primary: a step
-   * taken as the wrong DID is answered normally — the grant is issued, the
-   * declaration lands, the acknowledgement is accepted — against a mediation
-   * row nobody asked about, and the caller still sees `{ ok: true }`.
+   * is neither is refused by name, by EVERY step — the ones that go over the
+   * wire and `declare` / `undeclare`, which are REST writes against the node
+   * and would otherwise succeed. Nothing is served from the primary instead: a
+   * step taken as the wrong DID is answered normally — the grant is issued,
+   * the declaration lands, the acknowledgement is accepted — against a
+   * mediation row nobody asked about, and the caller still sees `{ ok: true }`.
+   *
+   * The refusal reaches the caller the way that step reports anything else:
+   * `{ ok: false, error }` for the steps that return a result, and a throw
+   * from `collect`, whose result type has no failure of its own.
    */
   did?: string;
 }
@@ -199,6 +205,7 @@ export async function declare(
   opts?: MediationOptions,
 ): Promise<SimpleResult> {
   try {
+    client._assertHostsDid(opts?.did);
     await client._rest.put(mediatorPath(opts?.did ?? client.did), { routing_did: mediator });
     return { ok: true };
   } catch (err) {
@@ -212,6 +219,7 @@ export async function undeclare(
   opts?: MediationOptions,
 ): Promise<SimpleResult> {
   try {
+    client._assertHostsDid(opts?.did);
     await client._rest.delete(mediatorPath(opts?.did ?? client.did));
     return { ok: true };
   } catch (err) {
@@ -259,12 +267,20 @@ export async function collect(
   attachments: Attachment[],
   opts?: PickupOptions,
 ): Promise<{ collected: number; complete: boolean }> {
+  // Before anything is re-injected, not after: an acknowledgement that cannot
+  // be sent at all is not a lost ack, it is a caller naming a DID this client
+  // does not hold. Re-injecting first and then swallowing the refusal below
+  // would put the message into the node with nothing to clear the queue, and
+  // answer `collected` for a message that is delivered again next drain.
+  client._assertHostsDid(opts?.did);
   const { ok, failed } = await reinject(client, attachments, opts);
   if (ok.length > 0) {
     try {
       await request(client, mediator, `${PICKUP}messages-received`, { message_id_list: ok }, opts);
     } catch {
       // The messages are in; a lost ack only means a redelivery next time.
+      // This catch is for a transport failure. The only non-transport reason
+      // the request could fail — an unhosted DID — was ruled out above.
     }
   }
   return { collected: ok.length, complete: failed.length === 0 };
