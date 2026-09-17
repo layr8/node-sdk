@@ -6,6 +6,15 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
 
 ## [Unreleased]
 
+### Fixed
+
+- **`leaveDid()` now actually leaves.** `phx_leave` was sent with a `null`
+  join ref. Phoenix acts on a leave only when its join ref matches the one the
+  topic was joined with, and drops any other leave without replying, so every
+  `leaveDid()` was a silent no-op: the node kept the DID bound, kept
+  refreshing its delegated set and kept its name taken until the whole
+  WebSocket closed. The leave now carries the topic's join ref.
+
 ## [0.4.6] - 2026-09-16
 
 ### Fixed

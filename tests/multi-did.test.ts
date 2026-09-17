@@ -20,6 +20,16 @@ class MockServer {
   private wss: WebSocketServer;
   private client: WS | null = null;
   readonly joinedTopics: string[] = [];
+  /**
+   * Topics whose `phx_leave` the server ACCEPTED. Phoenix 1.7
+   * (`Phoenix.Socket.handle_in/4`, the `phx_leave` clause) forwards a leave to
+   * the channel only when its `join_ref` equals the one the topic was joined
+   * with; any other leave — including `join_ref: null` on a V2 socket — is
+   * dropped with no reply and the channel stays joined. This mock applies the
+   * same rule, so a leave the real node would ignore does not land here.
+   */
+  readonly leftTopics: string[] = [];
+  private readonly joinRefs = new Map<string, string | null>();
   readonly sent: Array<{ event: string; topic: string; payload: unknown }> = [];
 
   /**
@@ -36,6 +46,7 @@ class MockServer {
       this.client = ws;
       ws.on("message", (data: Buffer) => {
         const arr = JSON.parse(data.toString()) as unknown[];
+        const joinRef = arr[0] as string | null;
         const ref = arr[1] as string | null;
         const topic = arr[2] as string;
         const event = arr[3] as string;
@@ -53,13 +64,23 @@ class MockServer {
             return;
           }
           this.joinedTopics.push(topic);
+          this.joinRefs.set(topic, joinRef);
           ws.send(JSON.stringify([
             ref, ref, topic, "phx_reply",
             { status: "ok", response: { did: topic.replace("plugins:", "") } },
           ]));
           return;
         }
-        if (event === "phx_leave") return; // no reply needed
+        if (event === "phx_leave") {
+          if (!this.joinRefs.has(topic)) return;
+          const existing = this.joinRefs.get(topic);
+          // Phoenix: `existing_join_ref in [join_ref, nil]`, otherwise ignored.
+          if (existing !== joinRef && existing !== null) return;
+          this.joinRefs.delete(topic);
+          this.leftTopics.push(topic);
+          ws.send(JSON.stringify([joinRef, ref, topic, "phx_reply", { status: "ok", response: {} }]));
+          return;
+        }
         if (ref) {
           ws.send(JSON.stringify([
             null, ref, topic, "phx_reply",
@@ -182,8 +203,11 @@ describe("Layr8Client multi-DID — joinDid / leaveDid lifecycle", () => {
     const newSends = server.sent.slice(sentBefore);
     const leave = newSends.find((s) => s.event === "phx_leave" && s.topic === `plugins:${BOB}`);
     expect(leave).toBeDefined();
-
+    // Sent is not enough: the node must act on it. A leave without the
+    // topic's join_ref is dropped silently by Phoenix and the child DID stays
+    // bound on the node until the whole WebSocket closes.
     await client.close();
+    expect(server.leftTopics).toContain(`plugins:${BOB}`);
   });
 
   it("leaveDid is a no-op for an unknown DID", async () => {
@@ -207,6 +231,7 @@ describe("Layr8Client multi-DID — joinDid / leaveDid lifecycle", () => {
     const leaves = server.sent.slice(sentBefore).filter((s) => s.event === "phx_leave");
     const topics = leaves.map((l) => l.topic).sort();
     expect(topics).toEqual([`plugins:${BOB}`, `plugins:${CAROL}`].sort());
+    expect([...server.leftTopics].sort()).toEqual([`plugins:${BOB}`, `plugins:${CAROL}`].sort());
   });
 });
 
