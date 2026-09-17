@@ -522,6 +522,32 @@ describe("revision must be a JSON integer literal", () => {
     expect(delegationRevisionSource('[null,null,"t","delegated_credentials",{"status":"complete"}]')).toBeUndefined();
   });
 
+  // What the connection does with a raw frame: parse it, and read the literal
+  // off the same text (connection.ts, the `delegated_credentials` branch).
+  const pushFromFrame = (frame: string) =>
+    parseDelegationPush((JSON.parse(frame) as unknown[])[4], delegationRevisionSource(frame));
+
+  it("reads the member JSON.parse keeps when the revision is written twice", () => {
+    // JSON.parse keeps the last duplicate, so the literal checked must be the last one too.
+    expect(delegationRevisionSource('[null,null,"t","delegated_credentials",{"revision":1,"revision":2.0}]')).toBe("2.0");
+    expect(delegationRevisionSource('[null,null,"t","delegated_credentials",{"revision":1.0,"status":"complete","revision":3}]')).toBe("3");
+    expect(pushFromFrame('[null,null,"t","delegated_credentials",{"revision":1,"status":"complete","credentials":[],"revision":2.0}]')).toBeUndefined();
+    expect(pushFromFrame('[null,null,"t","delegated_credentials",{"revision":1.0,"status":"complete","credentials":[],"revision":2}]')).toEqual({
+      revision: 2,
+      reading: { status: "complete", credentials: [] },
+    });
+  });
+
+  it("reads a revision whose member name is written with escapes", () => {
+    const frame = '[null,null,"t","delegated_credentials",{"rev\\u0069sion":1.0,"status":"complete","credentials":[]}]';
+    expect((JSON.parse(frame) as unknown[])[4]).toMatchObject({ revision: 1 });
+    expect(delegationRevisionSource(frame)).toBe("1.0");
+    expect(pushFromFrame(frame)).toBeUndefined();
+    expect(delegationRevisionSource('[null,null,"t","delegated_credentials",{"\\u0072evision":4}]')).toBe("4");
+    // An escaped name that decodes to something else is still not the revision.
+    expect(delegationRevisionSource('[null,null,"t","delegated_credentials",{"revision\\n":1.0,"revision":5}]')).toBe("5");
+  });
+
   it("rejects 1.0 and 1e0 given their source, accepts 1", () => {
     const payload = { revision: 1, status: "complete", credentials: [] };
     expect(parseDelegationPush(payload, "1.0")).toBeUndefined();

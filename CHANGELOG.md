@@ -6,6 +6,15 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
 
 ## [Unreleased]
 
+### Fixed
+
+- The check that a pushed `revision` is a JSON integer literal now reads the
+  member `JSON.parse` applies. A push that wrote `revision` twice
+  (`{"revision":1,"revision":2.0}`) was checked against the first literal and
+  applied with the second; one whose member name used escapes
+  (`"rev\u0069sion":1.0`) was not found by the check at all and applied. Both
+  are now refused.
+
 ## [0.4.5] - 2026-09-16
 
 ### Added

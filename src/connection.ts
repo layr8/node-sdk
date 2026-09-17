@@ -32,10 +32,16 @@ export function marshalPhoenixMsg(msg: PhoenixMessage): string {
  *
  * `JSON.parse` turns `1.0` into `1`; this is what lets a push written with a
  * non-integer revision be rejected, as the other SDKs reject it.
+ *
+ * It answers for the member `JSON.parse` keeps, so the literal checked is the
+ * value applied: a member name is compared after its escapes are decoded
+ * (`"rev\u0069sion"` is `revision`), and when the member appears more than
+ * once the last one is returned, as `JSON.parse` keeps the last.
  */
 export function delegationRevisionSource(frame: string): string | undefined {
   let depth = 0;
   let key: string | undefined; // a member name just read at depth 2
+  let found: string | undefined;
   let i = 0;
   while (i < frame.length) {
     const ch = frame[i];
@@ -50,7 +56,7 @@ export function delegationRevisionSource(frame: string): string | undefined {
       i = j + 1;
       while (i < frame.length && /\s/.test(frame[i])) i++;
       if (depth === 2 && frame[i] === ":") {
-        key = text;
+        key = memberName(text);
         i++;
       } else {
         key = undefined;
@@ -58,16 +64,33 @@ export function delegationRevisionSource(frame: string): string | undefined {
       continue;
     }
     if (key === "revision" && depth === 2) {
+      key = undefined;
       let j = i;
       while (j < frame.length && /[-+0-9.eE]/.test(frame[j])) j++;
-      return j > i ? frame.slice(i, j) : undefined;
+      // A later duplicate replaces an earlier one, as in JSON.parse. A value that is
+      // not a number is refused by the parser whatever this returns.
+      found = j > i ? frame.slice(i, j) : undefined;
+      if (j > i) {
+        i = j;
+        continue;
+      }
     }
     key = undefined;
     if (ch === "[" || ch === "{") depth++;
     else if (ch === "]" || ch === "}") depth--;
     i++;
   }
-  return undefined;
+  return found;
+}
+
+/** A member name's raw text with its JSON escapes decoded; the raw text if it does not decode. */
+function memberName(raw: string): string {
+  if (!raw.includes("\\")) return raw;
+  try {
+    return JSON.parse(`"${raw}"`) as string;
+  } catch {
+    return raw;
+  }
 }
 
 export function unmarshalPhoenixMsg(data: string): PhoenixMessage {
