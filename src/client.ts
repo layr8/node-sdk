@@ -662,16 +662,22 @@ export class Layr8Client extends EventEmitter {
     this.wallet?.forgetDelivered(did);
   }
 
-  /** Gracefully shut down the client. Leaves every Channel and closes the WS. */
+  /**
+   * Gracefully shut down the client: `phx_leave` every additional Channel,
+   * then the primary Channel, then close the WS. The leaves are not awaited.
+   */
   async close(): Promise<void> {
     if (this.isClosed) return;
     this.isClosed = true;
     this.connected = false;
 
-    // Leave secondary Channels first so per-DID handlers can drain — the
-    // Connection.close call below also fires `onConnectionClose` on every
-    // registered Channel, so the order doesn't strictly matter, but it
-    // keeps the leaveDid path symmetric.
+    // Leave the additional Channels first, then the primary, then close the
+    // WS — the same order the Elixir, Go and Python SDKs use. Every leave is
+    // best effort: `Channel.leave()` writes `phx_leave` with the topic's join
+    // ref and does not wait for a reply, so a node that never answers cannot
+    // hold up close(). `Connection.close()` below writes no `phx_leave`; it
+    // only flips each Channel's flags, so a Channel not left here is left by
+    // the node only when it notices the WebSocket went away.
     for (const did of Array.from(this.didChannels.keys())) {
       try {
         const ch = this.didChannels.get(did);
@@ -684,6 +690,9 @@ export class Layr8Client extends EventEmitter {
     this.didChannels.clear();
     this.didHandlers.clear();
     if (this.primaryChannel) {
+      try {
+        this.primaryChannel.leave();
+      } catch { /* ignore */ }
       this.wallet?.forgetDelivered(this.primaryChannel.assignedDID() || this.cfg.agentDid);
     }
 

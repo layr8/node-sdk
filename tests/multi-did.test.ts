@@ -43,10 +43,22 @@ class MockServer {
    */
   readonly rejectJoinAttempts = new Map<string, number>();
 
+  /** When true, accepted `phx_leave`s get no reply — a node that never answers. */
+  silentLeaves = false;
+  /**
+   * `sent.length` at the moment the client's WebSocket closed, or `null`
+   * while it is open. Frames at indexes below this arrived before the close.
+   */
+  sentBeforeClose: number | null = null;
+
   constructor() {
     this.wss = ephemeralServer();
     this.wss.on("connection", (ws: WS) => {
       this.client = ws;
+      this.sentBeforeClose = null;
+      ws.on("close", () => {
+        this.sentBeforeClose = this.sent.length;
+      });
       const joinRefs = new Map<string, string | null>();
       ws.on("message", (data: Buffer) => {
         const arr = JSON.parse(data.toString()) as unknown[];
@@ -72,7 +84,12 @@ class MockServer {
           this.joinLog.push({ topic, joinRef });
           ws.send(JSON.stringify([
             ref, ref, topic, "phx_reply",
-            { status: "ok", response: { did: topic.replace("plugins:", "") } },
+            {
+              status: "ok",
+              // A join without a DID (`"plugins:"`) is assigned one, as the
+              // auto-DID path expects.
+              response: { did: topic === "plugins:" ? ASSIGNED : topic.replace("plugins:", "") },
+            },
           ]));
           return;
         }
@@ -83,6 +100,7 @@ class MockServer {
           if (existing !== joinRef && existing !== null) return;
           joinRefs.delete(topic);
           this.leftTopics.push(topic);
+          if (this.silentLeaves) return;
           ws.send(JSON.stringify([joinRef, ref, topic, "phx_reply", { status: "ok", response: {} }]));
           return;
         }
@@ -139,6 +157,7 @@ afterEach(async () => {
 const ALICE = "did:web:alice";
 const BOB = "did:web:bob";
 const CAROL = "did:web:carol";
+const ASSIGNED = "did:web:assigned-by-node";
 
 function newClient() {
   const client = new Layr8Client(discardErrors, {
@@ -223,7 +242,7 @@ describe("Layr8Client multi-DID — joinDid / leaveDid lifecycle", () => {
     await client.close();
   });
 
-  it("close() leaves every additional Channel before tearing down the WS", async () => {
+  it("close() leaves the additional Channels, then the primary, then closes the WS", async () => {
     const client = newClient();
     await client.connect();
     await client.joinDid(BOB, { protocols: ["x"] });
@@ -234,9 +253,66 @@ describe("Layr8Client multi-DID — joinDid / leaveDid lifecycle", () => {
     await delay(20);
 
     const leaves = server.sent.slice(sentBefore).filter((s) => s.event === "phx_leave");
-    const topics = leaves.map((l) => l.topic).sort();
-    expect(topics).toEqual([`plugins:${BOB}`, `plugins:${CAROL}`].sort());
-    expect([...server.leftTopics].sort()).toEqual([`plugins:${BOB}`, `plugins:${CAROL}`].sort());
+    const topics = leaves.map((l) => l.topic);
+    expect([...topics.slice(0, 2)].sort()).toEqual([`plugins:${BOB}`, `plugins:${CAROL}`].sort());
+    expect(topics[2]).toBe(`plugins:${ALICE}`);
+    expect(topics).toHaveLength(3);
+    // Accepted, not just sent: each leave carried the join ref its topic was
+    // joined with, so Phoenix would forward it to the channel.
+    expect([...server.leftTopics].sort()).toEqual(
+      [`plugins:${ALICE}`, `plugins:${BOB}`, `plugins:${CAROL}`].sort(),
+    );
+    // Every leave reached the server before the WebSocket closed.
+    expect(server.sentBeforeClose).toBe(server.sent.length);
+  });
+
+  it("close() leaves the primary Channel with its join ref when it is the only one", async () => {
+    const client = newClient();
+    try {
+      await client.connect();
+    } finally {
+      await client.close();
+    }
+    await delay(20);
+
+    expect(server.leftTopics).toEqual([`plugins:${ALICE}`]);
+    const primaryJoin = server.joinLog.find((j) => j.topic === `plugins:${ALICE}`);
+    expect(primaryJoin?.joinRef).toBeTruthy();
+  });
+
+  it("close() sends the primary's leave to the topic the server joined on the auto-DID path", async () => {
+    // No agentDid: the join goes to `"plugins:"` and the Channel renames its
+    // topic to the assigned DID afterwards. Phoenix holds the join under
+    // `"plugins:"`, so that is where the leave has to go.
+    const client = new Layr8Client(discardErrors, { nodeUrl: wsUrl, apiKey: "test-key" });
+    client.handle("https://layr8.io/protocols/echo/1.0/request", async () => null);
+    try {
+      await client.connect();
+      expect(client.did).toBe(ASSIGNED);
+    } finally {
+      await client.close();
+    }
+    await delay(20);
+
+    expect(server.joinLog.map((j) => j.topic)).toEqual(["plugins:"]);
+    expect(server.leftTopics).toEqual(["plugins:"]);
+  });
+
+  it("close() does not wait for a reply to the leaves and still closes the WS", async () => {
+    server.silentLeaves = true;
+    const client = newClient();
+    try {
+      await client.connect();
+      await client.joinDid(BOB, { protocols: ["x"] });
+    } finally {
+      const started = Date.now();
+      await client.close();
+      expect(Date.now() - started).toBeLessThan(500);
+    }
+    await delay(20);
+
+    expect([...server.leftTopics].sort()).toEqual([`plugins:${ALICE}`, `plugins:${BOB}`].sort());
+    expect(server.sentBeforeClose).not.toBeNull();
   });
 });
 
