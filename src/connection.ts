@@ -368,7 +368,8 @@ export class Connection {
   /**
    * Close the Connection. Marks every registered Channel closed (no
    * `phx_leave` is sent here; `Layr8Client.close()` leaves its additional
-   * Channels before calling this), stops liveness timers, rejects all
+   * Channels and then its primary Channel before calling this), stops
+   * liveness timers, rejects all
    * pending refs, closes the WebSocket.
    *
    * After `close()`, `dial()` will throw — construct a new Connection.

@@ -211,6 +211,14 @@ export class Channel {
   private readonly didSpec: Required<DidSpec>;
 
   private joinRef = "";
+  /**
+   * The topic the last `phx_join` was written to — the key the server holds
+   * this join under. It differs from `topic` on the auto-DID path, where
+   * `topic` is rewritten from `"plugins:"` to `plugins:<assigned DID>` after
+   * the reply; Phoenix still knows the join as `"plugins:"`, so a leave sent
+   * to the rewritten topic would find no channel there and change nothing.
+   */
+  private joinedTopic = "";
   private assignedDIDVal = "";
   /**
    * `undefined` until a join reply that named a parent arrives — see
@@ -310,7 +318,9 @@ export class Channel {
         // WebSocket closed.
         joinRef: this.joinRef || null,
         ref: this.connection.nextRef(),
-        topic: this.topic,
+        // The topic the server joined, not the one we renamed it to after
+        // the reply — see `joinedTopic`.
+        topic: this.joinedTopic || this.topic,
         event: "phx_leave",
         payload: {},
       });
@@ -624,6 +634,7 @@ export class Channel {
         event: "phx_join",
         payload: joinPayload,
       });
+      this.joinedTopic = this.topic;
     } catch (err) {
       if (signal && onAbort) signal.removeEventListener("abort", onAbort);
       throw err;
