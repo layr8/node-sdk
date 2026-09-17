@@ -548,7 +548,8 @@ currency.
 The cloud-node does not queue for an agent that is offline; a `layr8/mediator`
 in the Space does. Give the client the mediator's DID and it enrols, declares
 the mediator on its node, collects whatever was queued while it was away, and
-keeps live delivery on — on every connect and reconnect, in the background:
+keeps live delivery on — for its **primary** DID, on every connect and
+reconnect, in the background:
 
 ```typescript
 const client = new Layr8Client(logErrors(), {
@@ -571,9 +572,51 @@ them throws for a remote refusal; they return `{ ok: false, error }`.
 `mediatorLive: false` collects but leaves live delivery off; `didcommUrl`
 overrides where ciphertext is re-injected.
 
-The agent needs protocol grants on the mediator for
+The DID doing the mediating needs protocol grants on the mediator for
 `coordinate-mediation/3.0` and `messagepickup/3.0`, which the wallet attaches
-like any other. Forwards to the mediator need none.
+like any other — they are read for the DID a message is sent **from**, so for
+the case below they are needed on the joined DID, not on the primary. Forwards
+to the mediator need none.
+
+### Mediating a DID you joined
+
+A client can hold one DID as its primary and join others with `joinDid`. When
+the mediation belongs to a joined DID, pass it — every step that speaks for a
+DID takes an optional `did` and defaults to the primary, so nothing above
+changes. (`reinject` is the exception and takes none: the ciphertext names its
+own recipient.)
+
+```typescript
+const agent = await client.joinDid(agentDid, {
+  protocols: ["https://didcomm.org/basicmessage/2.0"],
+  mediated: true,
+});
+await mediation.bootstrap(client, mediatorDid, { did: agent.did });
+```
+
+`mediated: true` binds both mediation protocols on that DID's join **and**
+registers the live `delivery` handler for it. The two go together because
+either alone fails while reporting success: without the protocols the node
+never routes a push to that channel, and without the handler a push that does
+arrive is dropped as unhandled. A handler you register yourself for the
+delivery type wins, and the SDK then acknowledges nothing — it is yours.
+
+**Enrolment is yours to run, including after a reconnect.** The background
+bootstrap driven by the `mediator` config covers the primary only; there is no
+per-DID equivalent, because the config holds one mediator DID and a joined DID
+may have a different one or none. Re-run it from `client.on("reconnect", …)`,
+and **drain before re-arming live delivery** — live mode is cleared by the
+first push that fails, and the messages behind that push are already queued, so
+a re-arm that skips the drain leaves them sitting there. `bootstrap` does the
+two in that order.
+
+The protocols survive a reconnect on their own: the Channel keeps its join
+list and rejoins with it. Only the enrolment needs re-running.
+
+A `did` that is neither the primary nor one you joined is refused by name, by
+every step including `declare` and `undeclare` — a REST write against the node
+would otherwise succeed and point that DID's routing somewhere nobody is
+listening.
 
 ## Handler Options
 
