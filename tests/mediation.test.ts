@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import http from "node:http";
-import { WebSocketServer, WebSocket as WS } from "ws";
+import { WebSocket as WS } from "ws";
+import { ephemeralServer, readyUrl } from "./helpers/mock-ws-server.js";
 import { Layr8Client, mediation, MEDIATION_DELIVERY_TYPE, postDidcomm, RESTError } from "../src/index.js";
 import { resolveConfig } from "../src/config.js";
 import type { Attachment, ErrorHandler } from "../src/index.js";
@@ -62,8 +63,8 @@ describe("config", () => {
 
 describe("client wiring", () => {
   it("exposes mediator and didcommUrl and subscribes to messagepickup on join", async () => {
-    const port = 10000 + Math.floor(Math.random() * 50000);
-    const wss = new WebSocketServer({ port });
+    // Never guess a port: bind 0 and read back what the kernel assigned.
+    const wss = ephemeralServer();
     let joinPayload: any = null;
     wss.on("connection", (ws: WS) => {
       ws.on("message", (data: Buffer) => {
@@ -76,10 +77,10 @@ describe("client wiring", () => {
         }
       });
     });
-    await new Promise((r) => setTimeout(r, 50));
+    const nodeUrl = await readyUrl(wss);
 
     const client = new Layr8Client(discard, {
-      nodeUrl: `ws://127.0.0.1:${port}/plugin_socket/websocket`,
+      nodeUrl,
       apiKey: "k",
       agentDid: "did:web:n:a",
       mediator: "did:web:n:m",

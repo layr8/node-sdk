@@ -247,8 +247,8 @@ class FakeNode {
     this.socket?.terminate();
     this.socket = null;
     await new Promise<void>((r) => this.wss.close(() => r()));
-    // Release the port promptly: a keep-alive connection would hold it, and
-    // other test files pick their port at random from the same range.
+    // Release the port promptly: a keep-alive connection would hold it open
+    // and the file's servers are created once per test.
     this.http.closeAllConnections();
     await new Promise<void>((r) => this.http.close(() => r()));
   }

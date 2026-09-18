@@ -58,7 +58,15 @@ removal is a breaking change, so it takes a minor of its own when it lands.
 | `test` | Lint, build, unit tests on Node 20 |
 | `compat-test` | Compatibility suite |
 | `publish-npm` | Publishes `@layr8/sdk` to npm |
-| `publish-compat-image` | Builds and pushes the compat image, then triggers the compat gate |
+| `publish-compat-image` | Waits for npm to serve the new version, builds and pushes the compat image, then triggers the compat gate |
+
+The wait is not decoration. The npm registry is not read-your-writes: v0.4.9
+published, `publish-compat-image` started, and the Dockerfile's
+`npm install @layr8/sdk@0.4.9` failed with `notarget`. Re-running the same job
+minutes later passed with no other change. `scripts/wait-for-npm-version.sh`
+polls `npm view` for up to five minutes and fails with a named message when the
+version never appears, so a release that genuinely did not publish still goes
+red.
 
 `test` and `compat-test` duplicate what CI already ran on `main`. That is deliberate —
 a release can be cut from any commit, so the release chain re-verifies the exact tag it
