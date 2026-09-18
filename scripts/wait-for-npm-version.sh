@@ -15,6 +15,15 @@
 # consumer of a just-published version has to wait for it rather than assume
 # it.
 #
+# The wait cannot pass on a stale cached answer: `npm view` revalidates with
+# the registry on every call (measured — never a plain cache hit). What it
+# CANNOT do is speak for the next hop: the `npm install` inside the docker
+# build runs on a different network path with an empty cache, and may reach a
+# registry edge that this runner did not. So this shrinks the window; it does
+# not close it. If the install ever fails with `notarget` again despite a
+# successful wait, that is the reason, and the answer is a longer wait or a
+# retry around the build — not a shorter one here.
+#
 # Usage:
 #   scripts/wait-for-npm-version.sh <version>
 #
@@ -39,6 +48,12 @@ PACKAGE="${NPM_WAIT_PACKAGE:-@layr8/sdk}"
 ATTEMPTS="${NPM_WAIT_ATTEMPTS:-30}"
 DELAY="${NPM_WAIT_DELAY:-10}"
 
+# SECONDS is bash's own counter, reset here so the failure below reports time
+# that was MEASURED. `ATTEMPTS * DELAY` would understate it: the loop also
+# sleeps after the last look, and 30 registry round-trips are not free — the
+# arithmetic said 300s where the real elapsed is ~305-330s.
+SECONDS=0
+
 for attempt in $(seq 1 "$ATTEMPTS"); do
   if npm view "$PACKAGE@$VERSION" version >/dev/null 2>&1; then
     echo "$PACKAGE@$VERSION is resolvable on the registry (attempt $attempt)."
@@ -48,5 +63,5 @@ for attempt in $(seq 1 "$ATTEMPTS"); do
   sleep "$DELAY"
 done
 
-echo "::error::$PACKAGE@$VERSION was still not resolvable on the npm registry after $((ATTEMPTS * DELAY))s. The publish job reported success, so either the publish did not land or the registry is far slower than usual. Check 'npm view $PACKAGE versions', then re-drive the release with: gh workflow run release.yml -f version=$VERSION" >&2
+echo "::error::$PACKAGE@$VERSION was still not resolvable on the npm registry after ${SECONDS}s ($ATTEMPTS attempts). The publish job reported success, so either the publish did not land or the registry is far slower than usual. Check 'npm view $PACKAGE versions', then re-drive the release with: gh workflow run release.yml -f version=$VERSION" >&2
 exit 1
