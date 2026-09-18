@@ -57,8 +57,21 @@ removal is a breaking change, so it takes a minor of its own when it lands.
 | `resolve` | Works out the version from the tag (or the manual input) |
 | `test` | Lint, build, unit tests on Node 20 |
 | `compat-test` | Compatibility suite |
-| `publish-npm` | Publishes `@layr8/sdk` to npm |
-| `publish-compat-image` | Builds and pushes the compat image, then triggers the compat gate |
+| `publish-npm` | Publishes `@layr8/sdk` to npm, unless the registry says it is already there |
+| `publish-compat-image` | Waits for npm to serve the new version, builds and pushes the compat image, then triggers the compat gate |
+
+The wait is not decoration. The npm registry is not read-your-writes: v0.4.9
+published, `publish-compat-image` started, and the Dockerfile's
+`npm install @layr8/sdk@0.4.9` failed with `notarget`. Re-running the same job
+minutes later passed with no other change. `scripts/wait-for-npm-version.sh`
+polls `npm view` for up to five minutes and fails with a message naming the version
+and the time it actually waited, so a release that genuinely did not publish still
+goes red.
+
+The wait shrinks that window; it does not close it. `npm view` revalidates with the
+registry on every call, so the wait cannot pass on a cached answer — but the `npm
+install` inside the docker build is a different client on a different network path
+with an empty cache, and may reach an edge this runner did not.
 
 `test` and `compat-test` duplicate what CI already ran on `main`. That is deliberate —
 a release can be cut from any commit, so the release chain re-verifies the exact tag it
@@ -84,15 +97,28 @@ different repository.
 
 ## When a release partially fails
 
-Every publishing step is idempotent — it checks whether the artifact already exists and
-skips if so. To re-drive a release, use the manual trigger:
+Every publishing step is idempotent, and re-running is safe. To re-drive a release,
+use the manual trigger:
 
 ```bash
 gh workflow run release.yml -f version=0.2.1
 ```
 
 This checks out the `v0.2.1` tag, skips whatever already published, and completes the
-rest. It is always safe to re-run.
+rest.
+
+**What "idempotent" rests on, and what it does not.** Each step checks whether the
+artifact already exists — `npm view` for the package, `docker manifest inspect` for
+the image — and skips if so. For the image that check is conclusive. For npm it is
+not: the registry is not read-your-writes, so a re-drive inside that window can read
+"not published", publish, and be refused with `EPUBLISHCONFLICT`. A read cannot close
+that window, because whether something is published is decided by whoever accepts the
+publish. So `scripts/publish-if-absent.sh` keeps the read as the cheap path and treats
+the registry's duplicate refusal as success: the version is on npm, which is what the
+release needed. Any other publish failure is still a failure and still goes red.
+
+The same window is why `publish-compat-image` waits (above) rather than assuming the
+version it just published can be installed.
 
 ## Checking a release landed
 
