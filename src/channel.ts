@@ -355,9 +355,11 @@ export class Channel {
         payload,
       });
     } catch (err) {
-      // The pendingRef will time out on its own, but throwing eagerly
-      // is the desired user-facing behavior. The next phx_reply for this
-      // ref (if any) would no-op since the map entry is gone.
+      // Throwing eagerly is the desired user-facing behavior — but the ref
+      // must be forgotten first. Nothing awaits `replyPromise` once we
+      // throw, so letting it time out (or be swept by close()) would reject
+      // with no handler and kill the process.
+      this.connection.discardPendingRef(ref);
       throw err;
     }
     const raw = await replyPromise;
@@ -636,7 +638,11 @@ export class Channel {
       });
       this.joinedTopic = this.topic;
     } catch (err) {
+      // Same orphan as in `send`, and the likelier one in practice: a join
+      // runs inside the reconnect loop, against a socket that has only just
+      // been re-dialed and may already be gone again.
       if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+      this.connection.discardPendingRef(ref);
       throw err;
     }
 

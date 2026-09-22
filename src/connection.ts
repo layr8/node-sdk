@@ -346,6 +346,32 @@ export class Connection {
   }
 
   /**
+   * Forget a tracked ref whose frame never reached the wire.
+   *
+   * `trackPendingRef` arms a rejection for a ref the caller promises to
+   * write: the reply timeout, plus the `close()` and `rejectPendingRefs()`
+   * sweeps. When the write throws instead, the caller rethrows and nothing
+   * is ever awaiting that promise — so the armed rejection lands with no
+   * handler, and an unhandled rejection is fatal on Node >= 15 and on Bun.
+   *
+   * Seen in the field as a broker daemon dying ~15s after a network blip
+   * with `error: server reply timeout`: the reconnect loop re-dialed, the
+   * `phx_join` write failed against a socket that was already gone, and the
+   * orphaned promise took the process down when its timer fired.
+   *
+   * Discarding clears the timer and drops the entry, so the promise simply
+   * never settles and is collected with its caller's stack. A late
+   * `phx_reply` for the ref no-ops, which is already true of every other
+   * path that deletes an entry.
+   */
+  discardPendingRef(ref: string): void {
+    const pending = this.pendingRefs.get(ref);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pendingRefs.delete(ref);
+  }
+
+  /**
    * Direct WebSocket write. Throws `NotConnectedError` if the socket isn't
    * OPEN. Used by both tracked sends (after `trackPendingRef`) and
    * fire-and-forget sends.

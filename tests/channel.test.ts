@@ -688,3 +688,84 @@ describe("a rejoin that returns no reading clears the last one", () => {
     expect(seen).toEqual([{ status: "complete", credentials: [CRED] }, undefined]);
   });
 });
+
+// A tracked send installs a reply timeout BEFORE the frame is written, so a
+// write that throws leaves a promise nobody awaits — and its armed rejection
+// (the 15s timeout, or the close()/disconnect sweeps) then lands with no
+// handler. An unhandled rejection is fatal on Node >= 15 and on Bun, so this
+// killed a broker daemon in the field ~15s after a network blip.
+describe("a frame that never reaches the wire leaves no orphaned rejection", () => {
+  let server: MockPhoenixServer | null = null;
+
+  afterEach(async () => {
+    if (server) await server.close();
+    server = null;
+  });
+
+  /** Run `body`, then report every unhandled rejection it left behind. */
+  async function unhandledDuring(body: () => Promise<void>): Promise<unknown[]> {
+    const seen: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      seen.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      await body();
+      // Unhandled rejections are reported at the end of a turn; give them one.
+      await delay(50);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+    return seen;
+  }
+
+  async function joined(): Promise<{ conn: Connection; ch: Channel }> {
+    server = new MockPhoenixServer();
+    const wsUrl = await server.ready();
+    autoReplyJoin(server);
+    const conn = new Connection(wsUrl, "test-api-key");
+    await conn.dial();
+    const ch = new Channel(conn, "did:web:test", { onMessage: () => {} });
+    await ch.join(["https://layr8.io/protocols/echo/1.0"]);
+    return { conn, ch };
+  }
+
+  it("send(): the sweep on close has nothing left to detonate", async () => {
+    const { conn, ch } = await joined();
+
+    const orphans = await unhandledDuring(async () => {
+      // The socket dies between `isConnected()` and the write — the race the
+      // reconnect loop loses on a laptop that just lost its network.
+      const realWrite = conn.writeMsg.bind(conn);
+      conn.writeMsg = () => {
+        throw new NotConnectedError();
+      };
+      await expect(ch.send("message", { body: "never sent" })).rejects.toThrow(
+        NotConnectedError,
+      );
+      conn.writeMsg = realWrite;
+
+      // close() rejects every ref still pending. Before the fix the orphan was
+      // one of them, and its rejection had nowhere to go.
+      conn.close();
+    });
+
+    expect(orphans).toEqual([]);
+  });
+
+  it("rejoin(): the same hole, on the path the reconnect loop actually takes", async () => {
+    const { conn, ch } = await joined();
+
+    const orphans = await unhandledDuring(async () => {
+      const realWrite = conn.writeMsg.bind(conn);
+      conn.writeMsg = () => {
+        throw new NotConnectedError();
+      };
+      await expect(ch.rejoin()).rejects.toThrow(NotConnectedError);
+      conn.writeMsg = realWrite;
+      conn.close();
+    });
+
+    expect(orphans).toEqual([]);
+  });
+});
