@@ -75,6 +75,10 @@ export {
   ErrorKind,
   SDKError,
   logErrors,
+  // Exported so callers that log a node URL themselves — the broker's own
+  // logging is where a key leaked in practice — can strip credentials with the
+  // same rule the SDK uses, instead of each reinventing it.
+  redactUrl,
 } from "./errors.js";
 export type { ErrorHandler } from "./errors.js";
 export { DELEGATION_REFRESH_CAPABILITY } from "./channel.js";
