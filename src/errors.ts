@@ -61,15 +61,57 @@ export class ProblemReportError extends Layr8Error {
   }
 }
 
+/**
+ * Strips credentials from a URL's query string, keeping everything a reader
+ * needs to diagnose a connection failure (scheme, host, path, other params).
+ *
+ * The cloud-node URL carries the agent's API key as `?api_key=…`, so an
+ * unredacted URL in an error message is a credential that travels wherever the
+ * error travels — a log file, a crash report, a session transcript. That is not
+ * hypothetical: a key reached a broker log this way, and from there a shared
+ * transcript.
+ *
+ * Anything unparseable is reported as "<unparseable url>" rather than passed
+ * through, because a URL this cannot parse is exactly the case where it cannot
+ * promise the key is gone.
+ */
+export function redactUrl(url: string): string {
+  const SENSITIVE = /^(api[-_]?key|access[-_]?token|auth[-_]?token|token|secret|password)$/i;
+  try {
+    const u = new URL(url);
+    let touched = false;
+    for (const name of [...u.searchParams.keys()]) {
+      if (SENSITIVE.test(name)) {
+        u.searchParams.set(name, "REDACTED");
+        touched = true;
+      }
+    }
+    if (u.password) {
+      u.password = "REDACTED";
+      touched = true;
+    }
+    // Only re-serialize when something changed, so an untouched URL is returned
+    // byte-for-byte rather than normalized out from under the reader.
+    return touched ? u.toString() : url;
+  } catch {
+    return "<unparseable url>";
+  }
+}
+
 /** Represents a failure to connect to the cloud-node. */
 export class ConnectionError extends Layr8Error {
+  /** The URL that failed, with any credentials in it redacted. */
   readonly url: string;
   readonly reason: string;
 
   constructor(url: string, reason: string) {
-    super(`connection error [${url}]: ${reason}`);
+    // Redact once, here, and store the redacted form: callers log `err.url` as
+    // readily as `err.message`, so redacting only the message would leak
+    // through the property.
+    const safe = redactUrl(url);
+    super(`connection error [${safe}]: ${reason}`);
     this.name = "ConnectionError";
-    this.url = url;
+    this.url = safe;
     this.reason = reason;
   }
 }
