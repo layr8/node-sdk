@@ -74,6 +74,13 @@ jobs:
           node-version: 20
           package-manager-cache: false
 
+      # Same step as ci.yaml: tests/redact-connection-error.test.ts dials under
+      # Bun and fails, rather than skips, when CI has no Bun. v0.4.10's first
+      # release run went red here because only ci.yaml had it.
+      # tests/workflows-set-up-bun.test.ts keeps the two in step.
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
       - name: Install dependencies
         run: npm ci
 
