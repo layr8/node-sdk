@@ -6,6 +6,8 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
 
 ## [Unreleased]
 
+## [0.4.10] - 2026-09-28
+
 ### Security
 
 - **The API key no longer leaks through `ConnectionError.reason`.** The
@@ -25,6 +27,18 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
   credential, listeners receive a redacted `ConnectionError` instead.
   `redactUrlsInText` is exported for callers that log runtime messages
   themselves.
+- **The API key no longer appears in `ConnectionError.url` or its message
+  (#88).** `redactUrl()` strips credential-bearing query parameters and any
+  userinfo password (keeping the parameter name, `api_key=REDACTED`), and
+  `ConnectionError` stores only the redacted form. `redactUrl` is exported.
+
+### Fixed
+
+- **A tracked frame whose write fails no longer leaves an unhandled rejection
+  (#87).** `send` and the join inside the reconnect loop armed a reply timeout
+  before writing and rethrew if the write threw, leaving a promise nobody
+  awaited; ~15s later its rejection was unhandled, which is fatal on Node >= 15
+  and on Bun. Both paths now discard the pending ref before rethrowing.
 
 ## [0.4.9] - 2026-09-17
 
@@ -574,6 +588,7 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
 - 16 new tests under `tests/multi-did.test.ts` covering `joinDid` lifecycle (before connect, duplicate DID, primary-DID rejection, `leaveDid`, close-tears-down-all), inbound routing by topic (per-DID first, fallback to client-global, override priority, unrelated topic drops), `DidHandle.send` (writes to its own topic, stamps `from`), and three reconnect scenarios (rejoin every Channel after WS drops, isolated rejoin failure in multi-DID, single-DID rejoin failure retries the backoff loop).
 - 3 small test-bug fixes in `tests/client.test.ts` where the wrong topic literal (`plugin:lobby`, singular and incorrect) was masked by the old monolith's lack of topic routing. Updated to `plugins:<agentDid>` to match production.
 
+[0.4.10]: https://github.com/layr8/node-sdk/releases/tag/v0.4.10
 [0.4.9]: https://github.com/layr8/node-sdk/releases/tag/v0.4.9
 [0.4.8]: https://github.com/layr8/node-sdk/releases/tag/v0.4.8
 [0.4.7]: https://github.com/layr8/node-sdk/releases/tag/v0.4.7
