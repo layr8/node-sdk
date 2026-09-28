@@ -79,6 +79,9 @@ export {
   // logging is where a key leaked in practice — can strip credentials with the
   // same rule the SDK uses, instead of each reinventing it.
   redactUrl,
+  // The same rule applied to free text, e.g. a runtime's error message that
+  // quotes the URL it dialed.
+  redactUrlsInText,
 } from "./errors.js";
 export type { ErrorHandler } from "./errors.js";
 export { DELEGATION_REFRESH_CAPABILITY } from "./channel.js";

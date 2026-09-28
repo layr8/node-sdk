@@ -31,6 +31,13 @@ jobs:
           node-version: 20
           cache: npm
 
+      # tests/redact-connection-error.test.ts dials under Bun in a child
+      # process: Bun's WebSocket quotes the full dialed URL, API key included,
+      # in its error, and Node's `ws` does not — so only Bun reproduces that
+      # leak. The test fails, rather than skips, when CI has no Bun.
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
       - name: Install dependencies
         run: npm ci
 

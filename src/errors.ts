@@ -62,6 +62,12 @@ export class ProblemReportError extends Layr8Error {
 }
 
 /**
+ * Query-parameter names whose value is a credential. Shared by
+ * {@link redactUrl} and {@link redactUrlsInText} so the two cannot drift.
+ */
+const SENSITIVE_PARAM = /^(api[-_]?key|access[-_]?token|auth[-_]?token|token|secret|password)$/i;
+
+/**
  * Strips credentials from a URL's query string, keeping everything a reader
  * needs to diagnose a connection failure (scheme, host, path, other params).
  *
@@ -76,12 +82,11 @@ export class ProblemReportError extends Layr8Error {
  * promise the key is gone.
  */
 export function redactUrl(url: string): string {
-  const SENSITIVE = /^(api[-_]?key|access[-_]?token|auth[-_]?token|token|secret|password)$/i;
   try {
     const u = new URL(url);
     let touched = false;
     for (const name of [...u.searchParams.keys()]) {
-      if (SENSITIVE.test(name)) {
+      if (SENSITIVE_PARAM.test(name)) {
         u.searchParams.set(name, "REDACTED");
         touched = true;
       }
@@ -98,21 +103,65 @@ export function redactUrl(url: string): string {
   }
 }
 
+// A URL embedded in prose: scheme, `://`, then everything up to whitespace or a
+// character that commonly delimits a quoted URL. Trailing sentence punctuation
+// is peeled off afterwards, because `…?api_key=x.` must not redact `x.` as the
+// value and then glue the full stop back on as part of the URL.
+const EMBEDDED_URL = /\b[a-z][a-z0-9+.-]*:\/\/[^\s'"`<>]+/gi;
+const TRAILING_PUNCTUATION = /[.,;:!?)\]}]+$/;
+// A credential pair outside any URL this could recognise — a bare query string,
+// or a URL whose scheme was cut off. Belt and braces behind EMBEDDED_URL.
+const BARE_PAIR =
+  /(^|[?&\s'"`(;,])(api[-_]?key|access[-_]?token|auth[-_]?token|token|secret|password)=([^&\s'"`#)\],;]+)/gi;
+
+/**
+ * Redacts credentials from every URL found inside free text — an error message
+ * from the WebSocket runtime, say, which is not ours to shape.
+ *
+ * This exists because the reason a runtime gives for a failed dial can quote
+ * the URL it dialed, key and all. Bun's WebSocket does exactly that:
+ * `WebSocket connection to 'wss://…?api_key=…&vsn=2.0.0' failed: Failed to
+ * connect`. Redacting only the URL we pass in misses it, because the URL we
+ * pass in never carried the key — the one the runtime quotes does.
+ *
+ * Each URL is redacted with {@link redactUrl}'s rule; then any credential pair
+ * left outside a recognisable URL is redacted too.
+ */
+export function redactUrlsInText(text: string): string {
+  const urlsDone = text.replace(EMBEDDED_URL, (match) => {
+    const tail = TRAILING_PUNCTUATION.exec(match)?.[0] ?? "";
+    const url = tail ? match.slice(0, -tail.length) : match;
+    return redactUrl(url) + tail;
+  });
+  return urlsDone.replace(BARE_PAIR, (_m, lead: string, name: string, value: string) => {
+    // As above: a full stop after the value ends the sentence, not the key.
+    const tail = TRAILING_PUNCTUATION.exec(value)?.[0] ?? "";
+    return `${lead}${name}=REDACTED${tail}`;
+  });
+}
+
 /** Represents a failure to connect to the cloud-node. */
 export class ConnectionError extends Layr8Error {
   /** The URL that failed, with any credentials in it redacted. */
   readonly url: string;
+  /**
+   * Why it failed, with any credentials in URLs it quotes redacted. Often the
+   * runtime's own message, which may quote the full dialed URL.
+   */
   readonly reason: string;
 
   constructor(url: string, reason: string) {
-    // Redact once, here, and store the redacted form: callers log `err.url` as
-    // readily as `err.message`, so redacting only the message would leak
-    // through the property.
-    const safe = redactUrl(url);
-    super(`connection error [${safe}]: ${reason}`);
+    // Redact once, here, and store the redacted forms: callers log `err.url`
+    // and `err.reason` as readily as `err.message`, so redacting only the
+    // message would leak through the properties. The reason needs it as much
+    // as the url does — it is where the key actually appeared (see
+    // redactUrlsInText).
+    const safeUrl = redactUrl(url);
+    const safeReason = redactUrlsInText(reason);
+    super(`connection error [${safeUrl}]: ${safeReason}`);
     this.name = "ConnectionError";
-    this.url = safe;
-    this.reason = reason;
+    this.url = safeUrl;
+    this.reason = safeReason;
   }
 }
 

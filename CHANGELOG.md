@@ -6,6 +6,26 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
 
 ## [Unreleased]
 
+### Security
+
+- **The API key no longer leaks through `ConnectionError.reason`.** The
+  previous fix (#88) redacted the `url` argument of `ConnectionError`, but the
+  SDK passes its own node URL there, which never carries the key — the key is
+  added only to the URL handed to the WebSocket. The leak was in the `reason`:
+  a failed dial passes the runtime's own error message through, and Bun's
+  WebSocket quotes the full dialed URL in it (`WebSocket connection to
+  'wss://…?api_key=<key>&vsn=2.0.0' failed: Failed to connect`). So after #88
+  the key still reached `err.message` and `err.reason` for every consumer
+  running on Bun, including `bun build --compile` binaries. Node's `ws` package
+  does not quote the URL, which is why the leak did not show under Node.
+  `ConnectionError` now redacts every URL inside its `reason` too (same
+  credential rule as `redactUrl`, plus userinfo passwords and bare
+  `api_key=…` pairs), and stores the redacted `reason`. The error handed to
+  `disconnect` listeners gets the same treatment: if its message carries a
+  credential, listeners receive a redacted `ConnectionError` instead.
+  `redactUrlsInText` is exported for callers that log runtime messages
+  themselves.
+
 ## [0.4.9] - 2026-09-17
 
 ### Added
