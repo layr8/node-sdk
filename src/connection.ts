@@ -1,6 +1,6 @@
 import WebSocket from "ws";
 import { Backoff } from "./backoff.js";
-import { ConnectionError, NotConnectedError } from "./errors.js";
+import { ConnectionError, NotConnectedError, redactUrlsInText } from "./errors.js";
 import type { Channel } from "./channel.js";
 
 /**
@@ -669,7 +669,16 @@ export class Connection {
     this.disarmPongWait();
   }
 
-  private onUnexpectedDisconnect(err: Error): void {
+  private onUnexpectedDisconnect(rawErr: Error): void {
+    // This error is handed to every `disconnect` listener, and listeners log
+    // it. A runtime's socket error may quote the dialed URL, API key included
+    // (Bun's does on dial). If its message carries a credential, hand on a
+    // ConnectionError with the credential redacted instead of the original,
+    // whose message and stack both hold the key.
+    const err =
+      redactUrlsInText(rawErr.message) === rawErr.message
+        ? rawErr
+        : new ConnectionError(this.wsUrl, rawErr.message);
     this.rejectPendingRefs();
     for (const channel of this.channels.values()) {
       try {
