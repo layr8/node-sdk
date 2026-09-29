@@ -279,8 +279,11 @@ describe("a real dial failure under Bun", () => {
       expect(r.name).toBe("ConnectionError");
       // Positive control: the runtime message that used to carry the key is
       // still there, so this is the path that leaked, not some other error.
+      // The dialed URL no longer carries the key at all (it rides the
+      // x-api-key header — tests/api-key-header.test.ts), so there is nothing
+      // left in it to redact.
       expect(String(r.reason)).toContain("WebSocket connection to");
-      expect(String(r.reason)).toContain("api_key=REDACTED");
+      expect(String(r.reason)).not.toContain("api_key");
       expect(JSON.stringify(r)).not.toContain(KEY);
     } finally {
       await srv.close();

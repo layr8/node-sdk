@@ -6,6 +6,25 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
 
 ## [Unreleased]
 
+### Security
+
+- **The API key is sent in the `x-api-key` handshake header, not the URL.**
+  `Connection` used to append `?api_key=<key>` to the plugin socket URL, and a
+  URL is recorded by everything it passes through — the ingress access log
+  held tens of thousands of cleartext keys within hours. The key now rides the
+  `x-api-key` request header (the header the node's REST API already reads)
+  and the dialed URL carries only `vsn=2.0.0`. Bun, which replaces `ws` with
+  its own implementation in `bun build --compile` launchers, sends the header
+  too; `tests/api-key-header.test.ts` dials a real server from a Bun child
+  process to keep that true.
+
+  **Requires a cloud-node that reads the header** (layr-8/cloud-node
+  `fix/plugin-socket-api-key-header`). Against an older node the join fails
+  with `e.connect.plugin.failed: Plugin connection failed [{:error,
+  :no_credentials}]`. Do not release this before the nodes your consumers dial
+  run that cloud-node version. Contract: layr8/contracts
+  `plugin-socket-auth.md`.
+
 ## [0.4.10] - 2026-09-28
 
 ### Security

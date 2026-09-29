@@ -452,15 +452,25 @@ export class Connection {
     }
 
     const parsed = new URL(this.wsUrl);
-    parsed.searchParams.set("api_key", this.apiKey);
     parsed.searchParams.set("vsn", "2.0.0");
 
     const [url, hostHeader] = rewriteLocalhostUrl(parsed.toString());
 
-    const wsOpts: WebSocket.ClientOptions = { handshakeTimeout: 10_000 };
+    // The API key rides the `x-api-key` request header, never the URL. A URL
+    // is written down by everything it passes through — ingress access logs,
+    // proxies, the runtime's own error messages — so a key in it ends up in
+    // somebody's log. The node reads the same header name on its REST API
+    // (see rest.ts); Phoenix only exposes `x-`-prefixed headers to a socket,
+    // which is why it is not `Authorization`.
+    //
+    // Under Bun (the compiled launcher), `ws` resolves to Bun's own
+    // implementation; it sends `headers` too — tests/api-key-header.test.ts
+    // dials a real server from a Bun child process to hold that true.
+    const headers: Record<string, string> = { "x-api-key": this.apiKey };
     if (hostHeader) {
-      wsOpts.headers = { Host: hostHeader };
+      headers.Host = hostHeader;
     }
+    const wsOpts: WebSocket.ClientOptions = { handshakeTimeout: 10_000, headers };
 
     return new Promise<void>((resolve, reject) => {
       if (signal?.aborted) {

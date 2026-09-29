@@ -71,11 +71,13 @@ const SENSITIVE_PARAM = /^(api[-_]?key|access[-_]?token|auth[-_]?token|token|sec
  * Strips credentials from a URL's query string, keeping everything a reader
  * needs to diagnose a connection failure (scheme, host, path, other params).
  *
- * The cloud-node URL carries the agent's API key as `?api_key=…`, so an
- * unredacted URL in an error message is a credential that travels wherever the
- * error travels — a log file, a crash report, a session transcript. That is not
+ * The cloud-node URL used to carry the agent's API key as `?api_key=…` (the
+ * SDK now sends it in the `x-api-key` header instead), and an unredacted URL
+ * in an error message is a credential that travels wherever the error travels
+ * — a log file, a crash report, a session transcript. That is not
  * hypothetical: a key reached a broker log this way, and from there a shared
- * transcript.
+ * transcript. The redaction stays as a backstop for a URL that still carries
+ * one — a caller's own `nodeUrl`, say.
  *
  * Anything unparseable is reported as "<unparseable url>" rather than passed
  * through, because a URL this cannot parse is exactly the case where it cannot
