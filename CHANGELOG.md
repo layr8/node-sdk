@@ -6,6 +6,8 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
 
 ## [Unreleased]
 
+## [0.4.11] - 2026-10-16
+
 ### Added
 
 - **`context.authorization`: the node's decision for this delivery.** A
