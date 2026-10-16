@@ -6,8 +6,8 @@ export interface MessageContext {
   authorized: boolean;
   senderCredentials: SenderCredential[];
   /**
-   * The node's authorization decision for this delivery (LAYR8-1431,
-   * contract `layr8/contracts` `cn-plugin-delivery-authorization.md`).
+   * The node's authorization decision for this delivery (contract
+   * `layr8/contracts` `cn-plugin-delivery-authorization.md`).
    *
    * Passed through exactly as the node sent it — this SDK does not rename,
    * fill in or drop its fields — so three cases stay apart:

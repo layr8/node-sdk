@@ -8,9 +8,9 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
 
 ### Added
 
-- **`context.authorization`: the node's decision for this delivery
-  (LAYR8-1431).** A cloud-node that carries the change (cloud-node #368)
-  sends the authorization decision it made for each routed message:
+- **`context.authorization`: the node's decision for this delivery.** A
+  cloud-node that supports it sends the authorization decision it made for
+  each routed message:
   `decision`, `reason`, `matched_grant_id` (null when no grant decided it) and
   the sender's admitted `identity_credentials`, each with `expiry`
   `declared` / `none` / `not_read`. It is passed through exactly as sent, in

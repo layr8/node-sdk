@@ -1,6 +1,6 @@
 /**
  * Boundary test, node-sdk side, for `layr8/contracts`
- * `cn-plugin-delivery-authorization.md` (LAYR8-1431).
+ * `cn-plugin-delivery-authorization.md`.
  *
  * The fixture is the `context` cloud-node's boundary test asserts it pushes
  * for an allow by grant
