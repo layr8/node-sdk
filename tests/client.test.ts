@@ -473,6 +473,56 @@ describe("Layr8Client", () => {
     await client.close();
   });
 
+  it("hands the node's context.authorization to the handler as sent (cn-plugin-delivery-authorization)", async () => {
+    await setupServer();
+
+    const client = new Layr8Client(discardErrors, {
+      nodeUrl: wsUrl,
+      apiKey: "test-key",
+      agentDid: "did:web:alice",
+    });
+
+    const seen: Message[] = [];
+    const twoSeen = new Promise<void>((resolve) => {
+      client.handle("https://didcomm.org/basicmessage/2.0/message", async (msg) => {
+        seen.push(msg);
+        if (seen.length === 2) resolve();
+        return null;
+      });
+    });
+
+    await client.connect();
+
+    const authorization = {
+      decision: "allow",
+      reason: "allowed by grant",
+      matched_grant_id: "urn:uuid:g",
+      identity_credentials: [],
+    };
+    for (const [id, context] of [
+      ["with-decision", { recipient: "did:web:alice", authorization }],
+      ["no-decision", { recipient: "did:web:alice" }],
+    ] as const) {
+      server.sendToClient(null, null, "plugins:did:web:alice", "message", {
+        context,
+        plaintext: {
+          id,
+          type: "https://didcomm.org/basicmessage/2.0/message",
+          from: "did:web:bob",
+          to: ["did:web:alice"],
+          body: {},
+        },
+      });
+    }
+
+    await twoSeen;
+    const byId = Object.fromEntries(seen.map((m) => [m.id, m]));
+    expect(byId["with-decision"].context!.authorization).toEqual(authorization);
+    expect("authorization" in byId["no-decision"].context!).toBe(false);
+
+    await client.close();
+  });
+
   it("auto-fills response fields in handler", async () => {
     await setupServer();
 

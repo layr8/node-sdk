@@ -42,6 +42,8 @@ export type {
   Attachment,
   Message,
   MessageContext,
+  DeliveryAuthorization,
+  DeliveryIdentityCredential,
   SenderCredential,
   InternalMessage,
   TraceContext,

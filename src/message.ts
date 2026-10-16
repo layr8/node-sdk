@@ -5,6 +5,52 @@ export interface MessageContext {
   recipient: string;
   authorized: boolean;
   senderCredentials: SenderCredential[];
+  /**
+   * The node's authorization decision for this delivery (LAYR8-1431,
+   * contract `layr8/contracts` `cn-plugin-delivery-authorization.md`).
+   *
+   * Passed through exactly as the node sent it — this SDK does not rename,
+   * fill in or drop its fields — so three cases stay apart:
+   *
+   * - the property is **absent**: the node made no decision for this delivery
+   *   (or is older than the field). Never an allow.
+   * - an **object**: the node allowed this message. Read `reason` and
+   *   `matched_grant_id` to know whether a grant decided it.
+   * - `null`: only if a node ever sends `null`; it is not an allow either.
+   *
+   * It is the only key in `context` that is an authorization decision.
+   */
+  authorization?: DeliveryAuthorization | null;
+}
+
+/**
+ * `context.authorization`, in the node's own (snake_case) wire shape.
+ * See {@link MessageContext.authorization}.
+ */
+export interface DeliveryAuthorization {
+  /** `"allow"` on every delivery today: a deny never reaches the recipient. Treat anything else as not allowed. */
+  decision: string;
+  /** The PDP's reason, `"allowed by grant"` when a grant decided it; `null` when the handler that allowed it gave none. */
+  reason: string | null;
+  /** The grant that decided it, or `null` when no grant did (an allow rule, a thread continuation, ...). */
+  matched_grant_id: string | null;
+  /** The sender's identity credentials the node admitted for this message. `[]` means none were admitted. */
+  identity_credentials: DeliveryIdentityCredential[];
+}
+
+/** One admitted identity credential in {@link DeliveryAuthorization}. */
+export interface DeliveryIdentityCredential {
+  id: string | null;
+  issuer: string | null;
+  type: string[];
+  /** The credential's `validUntil` when `expiry` is `"declared"`; otherwise `null`. */
+  valid_until: string | null;
+  /**
+   * `"declared"`: `valid_until` was read. `"none"`: the credential declares no
+   * expiry. `"not_read"`: it declares one the node does not decode. A `null`
+   * `valid_until` alone never means "no expiry".
+   */
+  expiry: "declared" | "none" | "not_read" | (string & {});
 }
 
 /** A sender credential from the cloud-node. */
@@ -193,6 +239,7 @@ interface InboundEnvelope {
     sender_credentials?: Array<{
       credential_subject: { id: string; name: string };
     }>;
+    authorization?: DeliveryAuthorization | null;
   };
   plaintext: {
     id: string;
@@ -237,6 +284,11 @@ export function parseDIDComm(data: unknown): InternalMessage {
       recipient: env.context.recipient,
       authorized: env.context.authorized,
       senderCredentials: creds,
+      // As received: an absent key stays absent, so "no decision" is never
+      // turned into a value that reads as one.
+      ...("authorization" in env.context
+        ? { authorization: env.context.authorization }
+        : {}),
     };
   }
 
