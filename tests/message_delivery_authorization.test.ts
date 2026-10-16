@@ -97,4 +97,16 @@ describe("context.authorization", () => {
       ["not_read", null],
     ]);
   });
+
+  it("field names stay snake_case as the node sent them; nothing is camelCased", () => {
+    const msg = parseDIDComm(
+      envelope({ recipient: "did:web:credx", authorization: ALLOW_BY_GRANT }),
+    );
+    const auth = msg.context!.authorization as unknown as Record<string, unknown>;
+    expect(Object.keys(auth).sort()).toEqual(
+      ["decision", "identity_credentials", "matched_grant_id", "reason"],
+    );
+    const cred = (auth.identity_credentials as Record<string, unknown>[])[0];
+    expect(Object.keys(cred).sort()).toEqual(["expiry", "id", "issuer", "type", "valid_until"]);
+  });
 });

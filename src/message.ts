@@ -46,9 +46,10 @@ export interface DeliveryIdentityCredential {
   /** The credential's `validUntil` when `expiry` is `"declared"`; otherwise `null`. */
   valid_until: string | null;
   /**
-   * `"declared"`: `valid_until` was read. `"none"`: the credential declares no
-   * expiry. `"not_read"`: it declares one the node does not decode. A `null`
-   * `valid_until` alone never means "no expiry".
+   * `"declared"`: `valid_until` was read and parses as a date-time. `"none"`:
+   * the credential has no expiry field at all. `"not_read"`: an expiry is
+   * present but the node did not read it (unparseable, or a field it does not
+   * decode). A `null` `valid_until` alone never means "no expiry".
    */
   expiry: "declared" | "none" | "not_read" | (string & {});
 }
