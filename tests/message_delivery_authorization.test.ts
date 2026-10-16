@@ -50,8 +50,8 @@ const ROLE_CREDENTIAL_ALLOW: DeliveryAuthorization = {
       expiry: "declared",
       claims: {
         role: "operator",
-        namespaces: ["cust-new-workld-kaijie-5a4e3102"],
-        ticket: "LAYR8-1450",
+        namespaces: ["team-a-prod"],
+        ticket: "TICKET-1450",
       },
     },
   ],
