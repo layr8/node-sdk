@@ -6,6 +6,15 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
 
 ## [Unreleased]
 
+### Added
+
+- **`DeliveryIdentityCredential.claims`: a role credential's claims.** A
+  cloud-node that supports it adds `claims` to each admitted identity
+  credential in `context.authorization`: `{ role, namespaces, ticket }` for a
+  `Layr8RoleCredential` (each `null` when not read; `namespaces: []` means read
+  and empty), `null` for every other type. Type only: the SDK already passes
+  `authorization` through as received. New exported type `DeliveryRoleClaims`.
+
 ## [0.4.11] - 2026-10-16
 
 ### Added

@@ -52,6 +52,24 @@ export interface DeliveryIdentityCredential {
    * decode). A `null` `valid_until` alone never means "no expiry".
    */
   expiry: "declared" | "none" | "not_read" | (string & {});
+  /**
+   * A role credential's subject claims. An object only when `type` includes
+   * `"Layr8RoleCredential"`; `null` for every other type (the node passes no
+   * subject claims for it, which says nothing about what it claims). Absent
+   * when the node predates the field.
+   */
+  claims?: DeliveryRoleClaims | null;
+}
+
+/**
+ * The subject claims of a `Layr8RoleCredential`, as the node read them. Each
+ * is `null` when the subject does not carry it in this shape; never a default.
+ */
+export interface DeliveryRoleClaims {
+  role: string | null;
+  /** `[]` means read and empty; `null` means not read. */
+  namespaces: string[] | null;
+  ticket: string | null;
 }
 
 /** A sender credential from the cloud-node. */
