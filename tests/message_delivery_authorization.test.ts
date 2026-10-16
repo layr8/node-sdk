@@ -30,6 +30,29 @@ const ALLOW_BY_GRANT: DeliveryAuthorization = {
       type: ["VerifiableCredential", "CloudAccessIdentity"],
       valid_until: null,
       expiry: "not_read",
+      claims: null,
+    },
+  ],
+};
+
+// The role credential cloud-node's boundary test asserts it pushes
+// ("a role credential reaches the plugin with role, namespaces and ticket as claims").
+const ROLE_CREDENTIAL_ALLOW: DeliveryAuthorization = {
+  decision: "allow",
+  reason: "allowed by grant",
+  matched_grant_id: "urn:uuid:grant-operator",
+  identity_credentials: [
+    {
+      id: "urn:uuid:role-vc-1",
+      issuer: "did:web:node.example",
+      type: ["VerifiableCredential", "Layr8RoleCredential"],
+      valid_until: "2099-01-01T00:00:00Z",
+      expiry: "declared",
+      claims: {
+        role: "operator",
+        namespaces: ["team-a-prod"],
+        ticket: "TICKET-1450",
+      },
     },
   ],
 };
@@ -96,6 +119,35 @@ describe("context.authorization", () => {
       ["declared", "2099-01-01T00:00:00Z"],
       ["not_read", null],
     ]);
+  });
+
+  it("a role credential's claims survive parsing exactly as the node sent them", () => {
+    const msg = parseDIDComm(
+      envelope({ recipient: "did:web:credx", authorization: ROLE_CREDENTIAL_ALLOW }),
+    );
+    expect(msg.context!.authorization).toEqual(ROLE_CREDENTIAL_ALLOW);
+    const cred = msg.context!.authorization!.identity_credentials[0];
+    expect(Object.keys(cred.claims!).sort()).toEqual(["namespaces", "role", "ticket"]);
+  });
+
+  it("claims null, claims absent, and namespaces [] vs null stay distinct", () => {
+    const parsedCred = (cred: Record<string, unknown>) => {
+      const auth = { ...ROLE_CREDENTIAL_ALLOW, identity_credentials: [cred] };
+      const msg = parseDIDComm(envelope({ recipient: "r", authorization: auth }));
+      return msg.context!.authorization!.identity_credentials[0] as unknown as Record<string, unknown>;
+    };
+    const base = ROLE_CREDENTIAL_ALLOW.identity_credentials[0];
+    const withNull = parsedCred({ ...base, claims: null });
+    const { claims: _dropped, ...withoutClaims } = base;
+    const absent = parsedCred(withoutClaims);
+    expect("claims" in withNull).toBe(true);
+    expect(withNull.claims).toBeNull();
+    expect("claims" in absent).toBe(false);
+
+    const empty = parsedCred({ ...base, claims: { role: "investigator", namespaces: [], ticket: null } });
+    const notRead = parsedCred({ ...base, claims: { role: "investigator", namespaces: null, ticket: null } });
+    expect((empty.claims as Record<string, unknown>).namespaces).toEqual([]);
+    expect((notRead.claims as Record<string, unknown>).namespaces).toBeNull();
   });
 
   it("field names stay snake_case as the node sent them; nothing is camelCased", () => {

@@ -44,6 +44,7 @@ export type {
   MessageContext,
   DeliveryAuthorization,
   DeliveryIdentityCredential,
+  DeliveryRoleClaims,
   SenderCredential,
   InternalMessage,
   TraceContext,
