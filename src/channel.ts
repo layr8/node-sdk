@@ -661,7 +661,10 @@ export class Channel {
     // From here until this join has installed its reading, pushes on this
     // topic are held, never compared with the previous join's state.
     this.pendingPushes = [];
-    // Messages too: see `heldMessages`. A rejoin's hold starts empty here.
+    // Messages too: see `heldMessages`. `??=` keeps what is already held: if a
+    // first join's frames were never released (its owner had not called
+    // `releaseHeldMessages()` before the connection dropped), they stay at the
+    // front and the rejoin releases them, then anything newer, in arrival order.
     this.heldMessages ??= [];
     try {
       this.installJoinReply(await this.awaitJoinReply(ref, joinPayload, replyPromise, signal), requestRefresh);
