@@ -6,6 +6,16 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
 
 ## [Unreleased]
 
+### Fixed
+
+- **`joinDid`: a message that arrives with the join reply reaches the DID's
+  handlers.** The per-DID handlers were installed only after
+  `await channel.join(...)` resumed. The node routes to a Channel as soon as it
+  accepts the join, and `ws` emits every frame of one read back to back, so a
+  message read together with the join reply was dispatched first, found no
+  handler and was dropped as `NoHandler`. The handlers are now installed
+  before the join is sent, and removed again if the join fails.
+
 ## [0.4.11] - 2026-10-16
 
 ### Added

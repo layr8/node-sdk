@@ -563,20 +563,16 @@ export class Layr8Client extends EventEmitter {
       opts.didSpec,
     );
 
-    try {
-      await channel.join(protocols, opts.signal);
-    } catch (err) {
-      // Leave the Channel registered as cleanup — Channel.leave will
-      // unregister it. Best-effort.
-      try { channel.leave(); } catch { /* ignore */ }
-      throw err;
-    }
-
-    this.didChannels.set(did, channel);
-
+    // The handlers go in BEFORE the join is sent, not after it resolves. The
+    // node routes to this Channel from the moment it accepts the join, and the
+    // first message can arrive in the same read as the join reply: `ws` emits
+    // every frame of one read back to back, so that message is dispatched
+    // before `await channel.join(...)` resumes. Installed afterwards, the
+    // handlers were not there for it and it was dropped as `NoHandler`.
     const handlerEntries = Object.entries(opts.handlers ?? {});
+    let reg: HandlerRegistry | undefined;
     if (handlerEntries.length > 0 || opts.mediated) {
-      const reg = new HandlerRegistry();
+      reg = new HandlerRegistry();
       for (const [msgType, h] of handlerEntries) {
         if (typeof h === "function") {
           reg.register(msgType, h);
@@ -592,6 +588,18 @@ export class Layr8Client extends EventEmitter {
       }
       this.didHandlers.set(did, reg);
     }
+
+    try {
+      await channel.join(protocols, opts.signal);
+    } catch (err) {
+      // Leave the Channel registered as cleanup — Channel.leave will
+      // unregister it. Best-effort.
+      try { channel.leave(); } catch { /* ignore */ }
+      if (reg && this.didHandlers.get(did) === reg) this.didHandlers.delete(did);
+      throw err;
+    }
+
+    this.didChannels.set(did, channel);
 
     return new DidHandle(this, channel);
   }
