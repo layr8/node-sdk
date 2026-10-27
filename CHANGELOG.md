@@ -6,6 +6,30 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
 
 ## [Unreleased]
 
+### Fixed
+
+- **The first message after `joinDid` was dropped as `NoHandler`.** The node
+  routes to a DID's Channel as soon as it accepts the join, and `ws` emits
+  every frame of one socket read back to back, so a message read together
+  with the join reply was dispatched before `joinDid` had installed the DID's
+  handlers. A Channel joined with an explicit DID (`joinDid`, or `connect()`
+  with `agentDid`) now holds the `message` frames that arrive while its join
+  is in flight and replays them in arrival order once the join is complete:
+  after the join reply is installed (so the ack mode is the one the join
+  negotiated, `dispatch_reply` under `reply_protocol/1`) and, for `joinDid`,
+  after the DID's handlers and its entry in the client are in place and
+  `joinDid` has resolved, so a handler can send through the returned handle.
+  For `joinDid` they are released on a 0 ms timer after it resolves, so a
+  consumer test that uses fake timers must advance timers to see the first
+  message. The hold is bounded (256 frames). For such a Channel, a held frame
+  that cannot be delivered — the join failed, the DID was left first, or the
+  hold was full — is reported to the error handler as the new
+  `ErrorKind.HeldMessageDropped`, one report per frame, never dropped
+  silently. Not covered: `connect()` without `agentDid` joins on the
+  placeholder topic `plugins:` and is re-keyed only after the join reply is
+  installed, so a message read together with that reply is still dropped
+  silently, as before. No API change beyond the new enum member.
+
 ## [0.4.11] - 2026-10-16
 
 ### Added

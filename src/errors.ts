@@ -197,6 +197,12 @@ export enum ErrorKind {
   TransportWrite,
   /** A background mediation step (enrol / declare / collect / live) failed. */
   Mediation,
+  /**
+   * A message the node routed to a Channel while its join was in flight was
+   * held, and then could not be delivered: the join failed, the DID was left
+   * first, or too many arrived before the join completed. `cause` names which.
+   */
+  HeldMessageDropped,
 }
 
 /**

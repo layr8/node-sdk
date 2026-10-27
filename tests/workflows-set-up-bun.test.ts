@@ -14,6 +14,7 @@ const REPO_ROOT = new URL("..", import.meta.url);
 const WORKFLOWS = [".github/workflows/ci.yaml", ".github/workflows/release.yml"];
 const SETUP_BUN = /^\s*uses:\s*(oven-sh\/setup-bun@\S+)\s*$/;
 const RUNS_SUITE = /^\s*run:\s*npm test\s*$/;
+const BUN_VERSION = /^\s*bun-version:\s*(\S+)\s*$/;
 
 interface JobSteps {
   file: string;
@@ -64,5 +65,17 @@ describe("workflows that run the test suite set up Bun", () => {
       ),
     );
     expect([...versions]).toHaveLength(1);
+  });
+
+  // Unpinned, setup-bun installs the newest Bun, and a Bun release that
+  // rewords its WebSocket errors turns redact-connection-error red on a pull
+  // request that changed nothing near it (Bun 1.4.4, 2026-10-27).
+  it("pins one exact Bun version everywhere", () => {
+    const pinned = suiteJobs.map((j) => {
+      const v = j.lines.map((l) => BUN_VERSION.exec(l)?.[1]).find((x): x is string => !!x);
+      expect(v, `${j.file} job ${j.job} sets up Bun without an exact bun-version`).toMatch(/^\d+\.\d+\.\d+$/);
+      return v;
+    });
+    expect(new Set(pinned).size).toBe(1);
   });
 });
