@@ -6,6 +6,8 @@ This file starts at 0.2.0. Older versions (0.1.x) are recorded only in git histo
 
 ## [Unreleased]
 
+## [0.4.12] - 2026-10-27
+
 ### Fixed
 
 - **The first message after `joinDid` was dropped as `NoHandler`.** The node
