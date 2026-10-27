@@ -34,6 +34,12 @@ export type { ServerReply };
  */
 export interface ChannelCallbacks {
   onMessage: (payload: unknown) => void;
+  /**
+   * A `message` frame that was held while a join was in flight and will never
+   * be handed to `onMessage`: the join failed, the Channel was left first, or
+   * the hold was full. See `heldMessages`.
+   */
+  onHeldMessageDropped?: (payload: unknown, reason: HeldMessageDropReason) => void;
   onDisconnect?: (err: Error) => void;
   onReconnect?: () => void;
   onDelegatedCredentials?: (
@@ -53,6 +59,12 @@ export interface ChannelCallbacks {
     revision: number,
   ) => void;
 }
+
+/** Why a held `message` frame was dropped instead of delivered. */
+export type HeldMessageDropReason = "join-failed" | "left" | "hold-full";
+
+/** At most this many `message` frames are held for one join. */
+export const MAX_HELD_MESSAGES = 256;
 
 /**
  * One credential the node signed for this DID out of what its parent holds.
@@ -247,6 +259,23 @@ export class Channel {
    * join has installed its reading and revision, and then applied in order.
    */
   private pendingPushes: Array<{ payload: unknown; revisionSource?: string }> | null = null;
+  /**
+   * `message` frames that arrived while this Channel's join was not complete,
+   * in arrival order; `null` when nothing is being held.
+   *
+   * The node routes to a Channel from the moment it accepts the join, and the
+   * first message can come out of the same socket read as the join reply. It
+   * must not be dispatched until (a) `installJoinReply` has run, so it is
+   * answered in the negotiated ack mode (`reply_protocol/1` or legacy), and
+   * (b) the owner of the Channel has finished its own state — for `joinDid`,
+   * the per-DID handlers and the `didChannels` entry, so a handler can send as
+   * the DID and a closure over the returned handle sees it. So a first join
+   * holds until the owner calls `releaseHeldMessages()`; a rejoin releases as
+   * soon as its reply is installed. Bounded by `MAX_HELD_MESSAGES`; a frame
+   * over the bound, and every held frame of a join that failed or a Channel
+   * left before release, is reported through `onHeldMessageDropped`.
+   */
+  private heldMessages: unknown[] | null = null;
   private protocols: string[] = [];
   private joined = false;
   private left = false;
@@ -286,6 +315,26 @@ export class Channel {
     this.protocols = protocols;
     await this.joinImpl(signal);
     this.joined = true;
+    // Still holding: the owner releases once its own state is complete.
+  }
+
+  /**
+   * Hand the `message` frames held during the first join to `onMessage`, in
+   * arrival order, and stop holding. Called by the Channel's owner after
+   * `join()` resolved and its own state for this Channel is in place.
+   */
+  releaseHeldMessages(): void {
+    const held = this.heldMessages;
+    this.heldMessages = null;
+    if (!held) return;
+    for (const payload of held) this.callbacks.onMessage(payload);
+  }
+
+  private dropHeldMessages(reason: HeldMessageDropReason): void {
+    const held = this.heldMessages;
+    this.heldMessages = null;
+    if (!held) return;
+    for (const payload of held) this.callbacks.onHeldMessageDropped?.(payload, reason);
   }
 
   /**
@@ -297,6 +346,8 @@ export class Channel {
     if (this.left) return;
     await this.joinImpl();
     this.joined = true;
+    // The owner's state survived the reconnect; nothing else to wait for.
+    this.releaseHeldMessages();
   }
 
   /**
@@ -308,6 +359,7 @@ export class Channel {
     if (this.left) return;
     this.left = true;
     this.joined = false;
+    this.dropHeldMessages("left");
 
     try {
       this.connection.writeMsg({
@@ -479,6 +531,14 @@ export class Channel {
 
   /** Inbound `message` for this Channel's topic. */
   onMessage(payload: unknown): void {
+    if (this.heldMessages) {
+      if (this.heldMessages.length >= MAX_HELD_MESSAGES) {
+        this.callbacks.onHeldMessageDropped?.(payload, "hold-full");
+        return;
+      }
+      this.heldMessages.push(payload);
+      return;
+    }
     this.callbacks.onMessage(payload);
   }
 
@@ -601,10 +661,13 @@ export class Channel {
     // From here until this join has installed its reading, pushes on this
     // topic are held, never compared with the previous join's state.
     this.pendingPushes = [];
+    // Messages too: see `heldMessages`. A rejoin's hold starts empty here.
+    this.heldMessages ??= [];
     try {
       this.installJoinReply(await this.awaitJoinReply(ref, joinPayload, replyPromise, signal), requestRefresh);
     } catch (err) {
       this.pendingPushes = null;
+      this.dropHeldMessages("join-failed");
       throw err;
     }
     const held = this.pendingPushes ?? [];
@@ -779,6 +842,7 @@ export class PhoenixChannel {
     );
     try {
       await this.channel.join(protocols, signal);
+      this.channel.releaseHeldMessages();
     } catch (err) {
       // Single-DID facade: a failed join means the whole connect() failed.
       // Tear the Connection down so the caller (and the server) see a

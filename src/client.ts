@@ -41,6 +41,7 @@ import { Connection } from "./connection.js";
 import {
   Channel,
   type DelegatedCredentialsReading,
+  type HeldMessageDropReason,
   type ServerReply,
 } from "./channel.js";
 import { RestClient, restUrlFromWebSocket } from "./rest.js";
@@ -486,6 +487,7 @@ export class Layr8Client extends EventEmitter {
       this.cfg.agentDid,
       {
         onMessage: (payload) => this.dispatchInbound(channel, payload),
+        onHeldMessageDropped: (payload, reason) => this.reportHeldMessageDropped(payload, reason),
         onDelegatedCredentials: (did, reading) => this.applyDelegated(did, reading),
         onDelegationRefreshed: (did, reading) => this.emitDelegation(did, reading),
       },
@@ -506,6 +508,9 @@ export class Layr8Client extends EventEmitter {
 
     this.primaryChannel = channel;
     this.connected = true;
+    // Anything the node sent with the join reply is dispatched now, with the
+    // client in its connected state.
+    channel.releaseHeldMessages();
     this.startMediation();
   }
 
@@ -554,6 +559,7 @@ export class Layr8Client extends EventEmitter {
       did,
       {
         onMessage: (payload) => this.dispatchInbound(channel, payload),
+        onHeldMessageDropped: (payload, reason) => this.reportHeldMessageDropped(payload, reason),
         // Fires on every join AND rejoin, so a reconnected agent is holding
         // the credentials the node minted for its CURRENT DID document, not
         // the ones from a document a rejoin replaced.
@@ -563,16 +569,20 @@ export class Layr8Client extends EventEmitter {
       opts.didSpec,
     );
 
-    // The handlers go in BEFORE the join is sent, not after it resolves. The
-    // node routes to this Channel from the moment it accepts the join, and the
-    // first message can arrive in the same read as the join reply: `ws` emits
-    // every frame of one read back to back, so that message is dispatched
-    // before `await channel.join(...)` resumes. Installed afterwards, the
-    // handlers were not there for it and it was dropped as `NoHandler`.
+    try {
+      await channel.join(protocols, opts.signal);
+    } catch (err) {
+      // Leave the Channel registered as cleanup — Channel.leave will
+      // unregister it. Best-effort.
+      try { channel.leave(); } catch { /* ignore */ }
+      throw err;
+    }
+
+    this.didChannels.set(did, channel);
+
     const handlerEntries = Object.entries(opts.handlers ?? {});
-    let reg: HandlerRegistry | undefined;
     if (handlerEntries.length > 0 || opts.mediated) {
-      reg = new HandlerRegistry();
+      const reg = new HandlerRegistry();
       for (const [msgType, h] of handlerEntries) {
         if (typeof h === "function") {
           reg.register(msgType, h);
@@ -589,19 +599,31 @@ export class Layr8Client extends EventEmitter {
       this.didHandlers.set(did, reg);
     }
 
-    try {
-      await channel.join(protocols, opts.signal);
-    } catch (err) {
-      // Leave the Channel registered as cleanup — Channel.leave will
-      // unregister it. Best-effort.
-      try { channel.leave(); } catch { /* ignore */ }
-      if (reg && this.didHandlers.get(did) === reg) this.didHandlers.delete(did);
-      throw err;
-    }
-
-    this.didChannels.set(did, channel);
-
+    // A message the node sent with the join reply is dispatched only now —
+    // handlers registered, the DID in `didChannels`, the ack mode the join
+    // negotiated installed — and on a later macrotask, so the caller's
+    // `const handle = await joinDid(...)` has run first and a handler that
+    // closes over `handle` sees it. Frames that arrive meanwhile are held
+    // behind the earlier ones, so the order is the node's.
+    setTimeout(() => channel.releaseHeldMessages(), 0);
     return new DidHandle(this, channel);
+  }
+
+  /** One held message that will not be dispatched: reported, never silent. */
+  private reportHeldMessageDropped(payload: unknown, reason: HeldMessageDropReason): void {
+    let msg: Message | undefined;
+    try {
+      msg = parseDIDComm(payload);
+    } catch {
+      /* reported with the raw payload */
+    }
+    this.onError(new SDKError(ErrorKind.HeldMessageDropped, {
+      messageId: msg?.id,
+      type: msg?.type,
+      from: msg?.from,
+      raw: payload,
+      cause: new Error(`held while the join was in flight, then dropped: ${reason}`),
+    }));
   }
 
   /**
